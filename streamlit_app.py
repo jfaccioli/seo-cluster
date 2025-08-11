@@ -64,7 +64,6 @@ def load_csv(file) -> pd.DataFrame:
             .str.replace(",", "", regex=False)
         )
         ctr_numeric = pd.to_numeric(df["CTR"], errors="coerce")
-        # If CTR looked like '3.2', treat as percent (3.2% -> 0.032). If already 0.032, it stays.
         df["CTR"] = np.where(ctr_numeric > 1, ctr_numeric / 100.0, ctr_numeric)
 
     for c in ["Clicks", "Impressions", "Position"]:
@@ -134,10 +133,22 @@ if uploaded is not None:
     df_nb["cluster_id"] = cl_labels
     df_nb["cluster_prob"] = probabilities
 
-    # -------- Label clusters
+    # -------- Label clusters (impressions-weighted, smarter stopwords)
     with st.spinner("Naming clusters…"):
-        labels_df = label_clusters(df_nb, text_col="Query_norm", cluster_col="cluster_id")
+        labels_df = label_clusters(
+            df_nb,
+            text_col="Query_norm",
+            cluster_col="cluster_id",
+            weight_col="Impressions"
+        )
     df_nb = df_nb.merge(labels_df, on="cluster_id", how="left")
+
+    # Mark unclustered nicely
+    df_nb["cluster_label"] = np.where(
+        df_nb["cluster_id"] == -1,
+        "Unclustered (miscellaneous)",
+        df_nb["cluster_label"].fillna("")
+    )
 
     # -------- Aggregate summary
     clusters = (
@@ -214,21 +225,24 @@ if uploaded is not None:
         chosen_row = clusters[clusters["cluster_id"] == chosen_id].head(1)
         chosen_label = chosen_row["cluster_label"].iloc[0] if not chosen_row.empty else ""
 
-        df_cluster = df_nb[df_nb["cluster_id"] == chosen_id].copy()
-        brief_md = build_content_brief(
-            df_cluster=df_cluster,
-            cluster_id=chosen_id,
-            cluster_label=chosen_label,
-            centroids=centroids
-        )
+        if chosen_id == -1:
+            st.info("This is the **Unclustered** group. It contains mixed queries, so a single content brief isn’t useful. Try lowering **Min Cluster Size** or raising **Min Impressions** to reduce noise, or explore sub-topics manually.")
+        else:
+            df_cluster = df_nb[df_nb["cluster_id"] == chosen_id].copy()
+            brief_md = build_content_brief(
+                df_cluster=df_cluster,
+                cluster_id=chosen_id,
+                cluster_label=chosen_label,
+                centroids=centroids
+            )
 
-        st.markdown(brief_md)
-        st.download_button(
-            "⬇️ Download brief (Markdown)",
-            data=brief_md.encode("utf-8"),
-            file_name=f"content-brief-cluster-{chosen_id}.md",
-            mime="text/markdown"
-        )
+            st.markdown(brief_md)
+            st.download_button(
+                "⬇️ Download brief (Markdown)",
+                data=brief_md.encode("utf-8"),
+                file_name=f"content-brief-cluster-{chosen_id}.md",
+                mime="text/markdown"
+            )
 
     # -------- Optional map
     if show_umap:
