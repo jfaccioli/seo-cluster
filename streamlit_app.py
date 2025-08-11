@@ -1,7 +1,8 @@
+import re
 import streamlit as st
 import pandas as pd
 import numpy as np
-from typing import Tuple, List, Dict
+from typing import List
 
 # Local modules
 from clustering.preprocess import normalize_text
@@ -16,23 +17,58 @@ st.set_page_config(page_title="SEO Keyword Clusters (MVP)", layout="wide")
 @st.cache_data(show_spinner=False)
 def load_csv(file) -> pd.DataFrame:
     df = pd.read_csv(file)
-    cols = {c.lower(): c for c in df.columns}
-    rename = {}
-    for target in ["query","clicks","impressions","ctr","position","date"]:
-        for k,v in cols.items():
-            if k == target:
-                rename[v] = target.capitalize() if target == "query" else target.title()
-    df = df.rename(columns=rename)
-    if "Query" not in df.columns:
-    # Handle 'Top queries' from some GSC exports
-        if "Top queries" in df.columns:
-            df = df.rename(columns={"Top queries": "Query"})
-        else:
-            raise ValueError("CSV must include a 'Query' column (or 'Top queries') from GSC export.")
 
-    for c in ["Clicks","Impressions","Ctr","Position"]:
+    # 1) Normalize column names (case/spacing) and support "Top queries"
+    cols = {c.strip().lower(): c for c in df.columns}
+
+    def find(*cands):
+        for c in cands:
+            if c in cols:
+                return cols[c]
+        return None
+
+    q_col = find("query", "top queries")
+    clk   = find("clicks")
+    impr  = find("impressions")
+    ctr   = find("ctr")
+    pos   = find("position")
+    date  = find("date")
+
+    if not q_col:
+        raise ValueError("CSV must include a 'Query' or 'Top queries' column from GSC export.")
+
+    # 2) Rename to a stable schema
+    rename = {q_col: "Query"}
+    if clk:  rename[clk]  = "Clicks"
+    if impr: rename[impr] = "Impressions"
+    if ctr:  rename[ctr]  = "CTR"
+    if pos:  rename[pos]  = "Position"
+    if date: rename[date] = "Date"
+    df = df.rename(columns=rename)
+
+    # 3) Ensure numeric types (CTR can be '3.2%' or '0.032'; numbers can have commas)
+    if "CTR" in df.columns:
+        df["CTR"] = (
+            df["CTR"]
+            .astype(str)
+            .str.replace("%", "", regex=False)
+            .str.replace(",", "", regex=False)
+        )
+        # If CTR looked like '3.2', treat as percent (3.2% -> 0.032). If already 0.032, it still works.
+        ctr_numeric = pd.to_numeric(df["CTR"], errors="coerce")
+        df["CTR"] = np.where(ctr_numeric > 1, ctr_numeric / 100.0, ctr_numeric)
+    for c in ["Clicks", "Impressions", "Position"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(
+                df[c].astype(str).str.replace(",", "", regex=False),
+                errors="coerce"
+            )
+
+    # 4) Fill safe defaults if any columns are missing
+    for c, default in [("Clicks", 0), ("Impressions", 0), ("CTR", 0.0), ("Position", np.nan)]:
         if c not in df.columns:
-            df[c] = 0.0
+            df[c] = default
+
     return df
 
 st.title("🔎 SEO Keyword Clusters — Interactive MVP")
@@ -61,9 +97,10 @@ if uploaded is not None:
     df = df[df["Impressions"].fillna(0) >= min_impr].reset_index(drop=True)
     df["Query_norm"] = df["Query"].astype(str).map(normalize_text) if do_norm else df["Query"].astype(str)
 
+    # Exclude brand terms if provided
     if brand_terms.strip():
         brands = [b.strip().lower() for b in brand_terms.split(",") if b.strip()]
-        pattern = "|".join([b.replace(" ", r"\s+") for b in brands])
+        pattern = "|".join([re.escape(b) for b in brands])
         mask = ~df["Query_norm"].str.lower().str.contains(pattern, regex=True)
         df_nb = df[mask].copy()
     else:
@@ -81,36 +118,50 @@ if uploaded is not None:
         labels_df = label_clusters(df_nb, text_col="Query_norm", cluster_col="cluster_id")
     df_nb = df_nb.merge(labels_df, on="cluster_id", how="left")
 
-    clusters = df_nb.groupby(["cluster_id","cluster_label"], dropna=False).agg(
-        queries=("Query", "count"),
-        clicks=("Clicks", "sum"),
-        impressions=("Impressions", "sum"),
-        ctr=("Ctr", "mean"),
-        position=("Position", "mean"),
-    ).reset_index().sort_values(["impressions","clicks"], ascending=[False, False])
+    # Aggregate summary (note: 'CTR' is the column name)
+    clusters = (
+        df_nb.groupby(["cluster_id", "cluster_label"], dropna=False)
+        .agg(
+            queries=("Query", "count"),
+            clicks=("Clicks", "sum"),
+            impressions=("Impressions", "sum"),
+            ctr=("CTR", "mean"),
+            position=("Position", "mean"),
+        )
+        .reset_index()
+        .sort_values(["impressions", "clicks"], ascending=[False, False])
+    )
+
     opp = score_opportunities(clusters)
 
     st.subheader("📊 Clusters")
-    st.dataframe(clusters)
+    st.dataframe(clusters, use_container_width=True)
 
     st.subheader("💡 Opportunities")
-    st.dataframe(opp)
+    st.dataframe(opp, use_container_width=True)
 
     if show_umap:
         with st.spinner("Building 2D map…"):
             try:
                 import plotly.express as px
                 umap_2d = to_umap(embeddings)
-                plot_df = pd.DataFrame(umap_2d, columns=["x","y"])
+                plot_df = pd.DataFrame(umap_2d, columns=["x", "y"])
                 plot_df["cluster_id"] = cl_labels
                 plot_df["query"] = df_nb["Query"].values
-                fig = px.scatter(plot_df, x="x", y="y", color=plot_df["cluster_id"].astype(str),
-                                 hover_data=["query"], title="Query Map (UMAP)")
+                fig = px.scatter(
+                    plot_df, x="x", y="y",
+                    color=plot_df["cluster_id"].astype(str),
+                    hover_data=["query"], title="Query Map (UMAP)"
+                )
                 st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
                 st.warning(f"Could not render UMAP plot: {e}")
 
-    st.download_button("⬇️ Export clusters (CSV)", data=export_csv(clusters),
-                       file_name="clusters.csv", mime="text/csv")
+    st.download_button(
+        "⬇️ Export clusters (CSV)",
+        data=export_csv(clusters),
+        file_name="clusters.csv",
+        mime="text/csv"
+    )
 else:
     st.info("Upload a GSC Queries CSV to get started.")
