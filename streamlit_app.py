@@ -7,7 +7,7 @@ from typing import List
 # Local modules
 from clustering.preprocess import normalize_text
 from clustering.embed import embed_queries
-from clustering.cluster import cluster_embeddings, to_umap
+from clustering.cluster import cluster_embeddings
 from clustering.label import label_clusters
 from clustering.insights import score_opportunities, cluster_time_series
 from clustering.brief import build_content_brief
@@ -82,6 +82,27 @@ def load_csv(file) -> pd.DataFrame:
 
 
 # --------------------------
+# Helpers
+# --------------------------
+INTENT_RE = re.compile(r"^(who|what|when|where|why|how|can|does|do|is|are|should)\b", re.I)
+def intent_bucket(q: str) -> str:
+    s = (q or "").lower()
+    if INTENT_RE.search(s) or s.endswith("?"):
+        return "FAQ"
+    if "near me" in s or any(x in s for x in ["perth", "wa", "closest", "local"]):
+        return "Local / Navigational"
+    if any(x in s for x in ["price", "cost", "quote", "book", "apply", "eligibility", "provider", "service"]):
+        return "Transactional / Service"
+    if any(x in s for x in ["compare", "vs", "best", "top", "reviews"]):
+        return "Comparative"
+    return "Informational"
+
+
+def kpi_card(label: str, value: str):
+    st.metric(label=label, value=value)
+
+
+# --------------------------
 # UI
 # --------------------------
 st.title("🔎 SEO Keyword Clusters — Interactive MVP")
@@ -93,7 +114,6 @@ with st.sidebar:
     min_cluster_size = st.number_input("Min Cluster Size (HDBSCAN)", min_value=5, value=8, step=1)
     brand_terms = st.text_input("Brand terms (comma-separated, optional)", value="")
     do_norm = st.checkbox("Normalize queries (lowercase & trim)", value=True)
-    show_umap = st.checkbox("Show 2D Map (slower)", value=False)
     trend_metric = st.selectbox("Trend metric", options=["Impressions", "Clicks"], index=0)
     st.markdown("---")
     st.caption("Tip: raise Min Impressions for big CSVs (>20k rows).")
@@ -150,6 +170,9 @@ if uploaded is not None:
         df_nb["cluster_label"].fillna("")
     )
 
+    # Intent tagging for dashboard breakdowns
+    df_nb["intent"] = df_nb["Query_norm"].map(intent_bucket)
+
     # -------- Aggregate summary
     clusters = (
         df_nb.groupby(["cluster_id", "cluster_label"], dropna=False)
@@ -187,9 +210,130 @@ if uploaded is not None:
     except Exception:
         centroids = {}
 
-    # -------- Render clusters table (with or without trend column)
-    st.subheader("📊 Clusters")
-    if show_trend:
+    # ==========================
+    # DASHBOARD
+    # ==========================
+    st.header("📊 Dashboard")
+
+    # KPI row
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    with col1: kpi_card("Impressions", f"{int(df_nb['Impressions'].sum()):,}")
+    with col2: kpi_card("Clicks", f"{int(df_nb['Clicks'].sum()):,}")
+    with col3: kpi_card("Avg CTR", f"{(df_nb['CTR'].mean()*100 if df_nb['CTR'].notna().any() else 0):.2f}%")
+    with col4: kpi_card("Avg Position", f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—")
+    with col5: kpi_card("# Clusters", f"{(clusters['cluster_id']!=-1).sum():,}")
+    with col6:
+        share_top10 = df_nb.merge(
+            clusters.head(10)[["cluster_id"]],
+            on="cluster_id", how="inner"
+        )["Impressions"].sum() / max(df_nb["Impressions"].sum(), 1)
+        kpi_card("Top10 share", f"{share_top10*100:.1f}%")
+
+    # Filters on dashboard (cluster multi-select + metric)
+    clusters["_label_for_ui"] = clusters.apply(
+        lambda r: f"[{int(r['cluster_id'])}] {r['cluster_label'] or ''}".strip(),
+        axis=1
+    )
+    sel_clusters = st.multiselect(
+        "Filter clusters (optional)",
+        options=clusters["_label_for_ui"].tolist(),
+        default=clusters["_label_for_ui"].head(10).tolist()
+    )
+    def parse_id(x: str) -> int:
+        try: return int(x.split("]")[0].strip("["))
+        except: return -9999
+    selected_ids = {parse_id(x) for x in sel_clusters} if sel_clusters else None
+
+    # Subset for visuals
+    clusters_v = clusters.copy()
+    df_vis = df_nb.copy()
+    if selected_ids:
+        clusters_v = clusters_v[clusters_v["cluster_id"].isin(selected_ids)]
+        df_vis = df_vis[df_vis["cluster_id"].isin(selected_ids)]
+
+    import plotly.express as px
+
+    # Viz 1: Treemap (size=Impressions, color=CTR)
+    st.subheader("Treemap — Cluster scale & CTR")
+    if not clusters_v.empty:
+        fig_tm = px.treemap(
+            clusters_v,
+            path=["cluster_label"],
+            values="impressions",
+            color="ctr",
+            color_continuous_scale="Blues",
+            hover_data={"queries": True, "clicks": True, "position": True, "ctr": True}
+        )
+        fig_tm.update_layout(margin=dict(t=30,l=0,r=0,b=0))
+        st.plotly_chart(fig_tm, use_container_width=True)
+    else:
+        st.info("No clusters to show. Try adjusting filters.")
+
+    # Viz 2: Opportunity bubble (x=position, y=impressions, size=clicks, color=score)
+    st.subheader("Opportunity Map — Where to act next")
+    if not clusters_v.empty:
+        opp_v = opp.merge(clusters_v[["cluster_id","cluster_label"]], on="cluster_id", how="inner")
+        fig_bub = px.scatter(
+            opp_v,
+            x="position", y="impressions",
+            size="clicks",
+            color="score",
+            hover_name="cluster_label",
+            size_max=60,
+            labels={"position":"Avg Position (lower is better)", "impressions":"Impressions"}
+        )
+        fig_bub.update_layout(margin=dict(t=30,l=0,r=0,b=0), xaxis_autorange="reversed")
+        st.plotly_chart(fig_bub, use_container_width=True)
+    else:
+        st.info("No opportunities to display.")
+
+    # Viz 3: Trend line (if Date available)
+    if "Date" in df_vis.columns and df_vis["Date"].notna().any():
+        st.subheader(f"Trend — {trend_metric} by cluster")
+        ts = (
+            df_vis.dropna(subset=["Date"])
+                 .groupby([pd.Grouper(key="Date", freq="W-MON"), "cluster_label"], dropna=False)
+                 .agg(val=(trend_metric, "sum"))
+                 .reset_index()
+        )
+        if not ts.empty:
+            fig_line = px.line(ts, x="Date", y="val", color="cluster_label",
+                               labels={"val": trend_metric})
+            fig_line.update_layout(margin=dict(t=30,l=0,r=0,b=0))
+            st.plotly_chart(fig_line, use_container_width=True)
+        else:
+            st.info("No dated data to plot trends.")
+    else:
+        st.info("No **Date** column found in CSV, so trend charts are hidden. Export a Date+Query GSC report to enable.")
+
+    # Viz 4: Intent breakdown
+    st.subheader("Intent breakdown")
+    if not df_vis.empty:
+        intent_pivot = (
+            df_vis.groupby(["cluster_label","intent"])
+                  .size().reset_index(name="count")
+        )
+        fig_intent = px.bar(intent_pivot, x="cluster_label", y="count", color="intent", barmode="stack")
+        fig_intent.update_layout(margin=dict(t=30,l=0,r=0,b=0), xaxis={'visible': False, 'showticklabels': False})
+        st.plotly_chart(fig_intent, use_container_width=True)
+
+    # Viz 5: Top queries table (drilldown)
+    st.subheader("Top queries (drilldown)")
+    topq = (
+        df_vis.sort_values(["Impressions","Clicks"], ascending=[False, False])
+              [["cluster_label","Query","Clicks","Impressions","CTR","Position"]]
+              .head(500)
+    )
+    st.dataframe(topq, use_container_width=True)
+
+    # ==========================
+    # CLUSTERS + OPPORTUNITIES (tables)
+    # ==========================
+    st.header("📋 Tables")
+
+    # Clusters table (with or without trend)
+    st.subheader("Clusters")
+    if trend_df is not None and not trend_df.empty:
         st.dataframe(
             clusters,
             use_container_width=True,
@@ -202,40 +346,38 @@ if uploaded is not None:
             }
         )
     else:
-        if "Date" not in df_nb.columns or df_nb["Date"].isna().all():
-            st.info("No **Date** column found, so trends are disabled. Export a GSC report with both **Date** and **Query** dimensions to see cluster trends.")
         st.dataframe(clusters, use_container_width=True)
 
-    # -------- Opportunities
-    st.subheader("💡 Opportunities")
+    st.subheader("Opportunities")
     st.dataframe(opp, use_container_width=True)
 
-    # -------- Content Brief (rules-based, no API cost)
-    st.subheader("📄 Content Brief")
+    # ==========================
+    # CONTENT BRIEF
+    # ==========================
+    st.header("📄 Content Brief")
     if clusters.empty:
         st.info("No clusters yet. Upload a CSV or adjust filters.")
     else:
         # Cluster selector label
-        clusters["_label_for_ui"] = clusters.apply(
+        clusters["_label_for_ui2"] = clusters.apply(
             lambda r: f"[{int(r['cluster_id'])}] {r['cluster_label'] or ''}".strip(),
             axis=1
         )
-        sel = st.selectbox("Choose a cluster", options=clusters["_label_for_ui"].tolist())
+        sel = st.selectbox("Choose a cluster for a brief", options=clusters["_label_for_ui2"].tolist())
         chosen_id = int(sel.split("]")[0].strip("[")) if sel else None
         chosen_row = clusters[clusters["cluster_id"] == chosen_id].head(1)
         chosen_label = chosen_row["cluster_label"].iloc[0] if not chosen_row.empty else ""
 
         if chosen_id == -1:
-            st.info("This is the **Unclustered** group. It contains mixed queries, so a single content brief isn’t useful. Try lowering **Min Cluster Size** or raising **Min Impressions** to reduce noise, or explore sub-topics manually.")
+            st.info("This is the **Unclustered** group. It contains mixed queries, so a single content brief isn’t useful. Adjust filters or clustering settings to reduce noise.")
         else:
             df_cluster = df_nb[df_nb["cluster_id"] == chosen_id].copy()
             brief_md = build_content_brief(
                 df_cluster=df_cluster,
                 cluster_id=chosen_id,
                 cluster_label=chosen_label,
-                centroids=centroids
+                centroids=None  # centroids optional for now
             )
-
             st.markdown(brief_md)
             st.download_button(
                 "⬇️ Download brief (Markdown)",
@@ -244,25 +386,7 @@ if uploaded is not None:
                 mime="text/markdown"
             )
 
-    # -------- Optional map
-    if show_umap:
-        with st.spinner("Building 2D map…"):
-            try:
-                import plotly.express as px
-                umap_2d = to_umap(embeddings)
-                plot_df = pd.DataFrame(umap_2d, columns=["x", "y"])
-                plot_df["cluster_id"] = cl_labels
-                plot_df["query"] = df_nb["Query"].values
-                fig = px.scatter(
-                    plot_df, x="x", y="y",
-                    color=plot_df["cluster_id"].astype(str),
-                    hover_data=["query"], title="Query Map (UMAP)"
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            except Exception as e:
-                st.warning(f"Could not render UMAP plot: {e}")
-
-    # -------- Export
+    # Export summary
     st.download_button(
         "⬇️ Export clusters (CSV)",
         data=export_csv(clusters),
