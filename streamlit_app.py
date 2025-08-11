@@ -10,6 +10,7 @@ from clustering.embed import embed_queries
 from clustering.cluster import cluster_embeddings, to_umap
 from clustering.label import label_clusters
 from clustering.insights import score_opportunities, cluster_time_series
+from clustering.brief import build_content_brief
 from utils.export import export_csv
 
 st.set_page_config(page_title="SEO Keyword Clusters (MVP)", layout="wide")
@@ -121,6 +122,9 @@ if uploaded is not None:
     else:
         df_nb = df.copy()
 
+    # Important: reindex after brand filter so embeddings align with row positions
+    df_nb = df_nb.reset_index(drop=True)
+
     # -------- Embed & cluster
     with st.spinner("Embedding queries…"):
         embeddings = embed_queries(df_nb["Query_norm"].tolist())
@@ -151,12 +155,30 @@ if uploaded is not None:
 
     # -------- Trend sparkline (if Date available)
     trend_df = cluster_time_series(df_nb, metric=trend_metric)
-    if trend_df is not None and not trend_df.empty:
+    show_trend = trend_df is not None and not trend_df.empty
+    if show_trend:
         clusters = clusters.merge(
             trend_df[["cluster_id", "cluster_label", "trend"]],
             on=["cluster_id", "cluster_label"], how="left"
         )
-        st.subheader("📊 Clusters")
+
+    # -------- Opportunities
+    opp = score_opportunities(clusters)
+
+    # -------- Compute centroids per cluster (for internal link suggestions in brief)
+    centroids: dict[int, np.ndarray] = {}
+    try:
+        E = embeddings.toarray() if hasattr(embeddings, "toarray") else np.asarray(embeddings)
+        for cid, sub in df_nb.groupby("cluster_id"):
+            idxs = sub.index.values  # row positions align with E because we reset_index above
+            vecs = E[idxs] if len(idxs) else None
+            centroids[cid] = vecs.mean(axis=0) if vecs is not None and vecs.size else None
+    except Exception:
+        centroids = {}
+
+    # -------- Render clusters table (with or without trend column)
+    st.subheader("📊 Clusters")
+    if show_trend:
         st.dataframe(
             clusters,
             use_container_width=True,
@@ -171,13 +193,42 @@ if uploaded is not None:
     else:
         if "Date" not in df_nb.columns or df_nb["Date"].isna().all():
             st.info("No **Date** column found, so trends are disabled. Export a GSC report with both **Date** and **Query** dimensions to see cluster trends.")
-        st.subheader("📊 Clusters")
         st.dataframe(clusters, use_container_width=True)
 
     # -------- Opportunities
-    opp = score_opportunities(clusters)
     st.subheader("💡 Opportunities")
     st.dataframe(opp, use_container_width=True)
+
+    # -------- Content Brief (rules-based, no API cost)
+    st.subheader("📄 Content Brief")
+    if clusters.empty:
+        st.info("No clusters yet. Upload a CSV or adjust filters.")
+    else:
+        # Cluster selector label
+        clusters["_label_for_ui"] = clusters.apply(
+            lambda r: f"[{int(r['cluster_id'])}] {r['cluster_label'] or ''}".strip(),
+            axis=1
+        )
+        sel = st.selectbox("Choose a cluster", options=clusters["_label_for_ui"].tolist())
+        chosen_id = int(sel.split("]")[0].strip("[")) if sel else None
+        chosen_row = clusters[clusters["cluster_id"] == chosen_id].head(1)
+        chosen_label = chosen_row["cluster_label"].iloc[0] if not chosen_row.empty else ""
+
+        df_cluster = df_nb[df_nb["cluster_id"] == chosen_id].copy()
+        brief_md = build_content_brief(
+            df_cluster=df_cluster,
+            cluster_id=chosen_id,
+            cluster_label=chosen_label,
+            centroids=centroids
+        )
+
+        st.markdown(brief_md)
+        st.download_button(
+            "⬇️ Download brief (Markdown)",
+            data=brief_md.encode("utf-8"),
+            file_name=f"content-brief-cluster-{chosen_id}.md",
+            mime="text/markdown"
+        )
 
     # -------- Optional map
     if show_umap:
