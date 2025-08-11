@@ -18,7 +18,7 @@ def _build_stopwords(user_stopwords=None):
         sw |= set(user_stopwords)
     return sw
 
-def _c_tfidf(docs: list[str], weights: np.ndarray | None, stop_words) -> tuple[np.ndarray, np.ndarray]:
+def _c_tfidf(docs: list[str], weights: np.ndarray | None, stop_words_list) -> tuple[np.ndarray, np.ndarray]:
     """
     Lightweight c-TF-IDF:
     - Build CountVectorizer over docs (each doc = one cluster concatenated)
@@ -29,7 +29,8 @@ def _c_tfidf(docs: list[str], weights: np.ndarray | None, stop_words) -> tuple[n
     if not docs:
         return np.zeros((0, 0)), np.array([])
 
-    cv = CountVectorizer(ngram_range=(1, 3), stop_words=stop_words, min_df=1)
+    # sklearn requires stop_words to be None, 'english', or an iterable (list/tuple), not a set
+    cv = CountVectorizer(ngram_range=(1, 3), stop_words=stop_words_list, min_df=1)
     X = cv.fit_transform(docs)  # shape: (n_docs, n_terms)
     terms = cv.get_feature_names_out()
 
@@ -37,14 +38,13 @@ def _c_tfidf(docs: list[str], weights: np.ndarray | None, stop_words) -> tuple[n
 
     # If weights provided, scale term frequencies for each doc
     if weights is not None:
-        # weights shape (n_docs,), broadcast across terms
         w = np.asarray(weights, dtype=float).reshape(-1, 1)
         tf = tf * (w / (w.max() if w.max() else 1.0))
 
     # c-TF-IDF idf: log(N / df)
     df_counts = (X > 0).sum(axis=0).A1  # document frequency per term
     N = len(docs)
-    idf = (np.log((N + 1) / (df_counts + 1)) + 1.0)  # smooth
+    idf = (np.log((N + 1) / (df_counts + 1)) + 1.0)  # smoothed
     scores = tf * idf  # shape (n_docs, n_terms)
 
     return scores, terms
@@ -54,15 +54,16 @@ def _pick_top_phrases(scores: np.ndarray, terms: np.ndarray, k: int = 3) -> list
     if scores.size == 0 or terms.size == 0:
         return out
     for row in scores:
-        # top-k non-trivial terms
         idx = np.argsort(row)[::-1]
         chosen = []
         for i in idx:
             t = terms[i]
             if len(t) <= 2:
                 continue
-            # avoid very generic residues
             if t.isnumeric():
+                continue
+            # avoid trivial overlaps like "ndis" vs "ndis wa" dominating both
+            if any(t in c or c in t for c in chosen):
                 continue
             chosen.append(t)
             if len(chosen) >= k:
@@ -88,30 +89,30 @@ def label_clusters(
     if df.empty or text_col not in df.columns or cluster_col not in df.columns:
         return pd.DataFrame(columns=[cluster_col, "cluster_label"])
 
-    labels = []
+    cluster_ids = []
     docs = []
     weights = []
 
     # Build one "document" per cluster by concatenating normalized queries
     for cid, sub in df.groupby(cluster_col):
-        labels.append(cid)
-        # join with spaces; keep duplicates (they carry weight via impressions)
+        cluster_ids.append(cid)
         docs.append(" ".join(sub[text_col].astype(str).tolist()))
         if weight_col and (weight_col in sub.columns):
-            # weight per-cluster: total impressions (or sum chosen metric)
             weights.append(float(sub[weight_col].fillna(0).sum()))
         else:
             weights.append(1.0)
 
-    stop_words = _build_stopwords(user_stopwords)
-    scores, terms = _c_tfidf(docs, np.array(weights, dtype=float), stop_words)
+    # IMPORTANT: pass list, not set
+    stop_words_list = list(_build_stopwords(user_stopwords))
+
+    scores, terms = _c_tfidf(docs, np.array(weights, dtype=float), stop_words_list)
     top_phrases = _pick_top_phrases(scores, terms, k=top_k)
 
     out = pd.DataFrame({
-        cluster_col: labels,
+        cluster_col: cluster_ids,
         "cluster_label": top_phrases
     })
 
-    # Nice tweak: title-case labels but keep acronyms intact
+    # Title-case labels but keep acronyms
     out["cluster_label"] = out["cluster_label"].apply(lambda s: s.title() if isinstance(s, str) else s)
     return out
