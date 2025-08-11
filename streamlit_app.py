@@ -24,7 +24,12 @@ def load_csv(file) -> pd.DataFrame:
                 rename[v] = target.capitalize() if target == "query" else target.title()
     df = df.rename(columns=rename)
     if "Query" not in df.columns:
-        raise ValueError("CSV must include a 'Query' column from GSC export.")
+    # Handle 'Top queries' from some GSC exports
+    if "Top queries" in df.columns:
+        df = df.rename(columns={"Top queries": "Query"})
+    else:
+        raise ValueError("CSV must include a 'Query' column (or 'Top queries') from GSC export.")
+
     for c in ["Clicks","Impressions","Ctr","Position"]:
         if c not in df.columns:
             df[c] = 0.0
