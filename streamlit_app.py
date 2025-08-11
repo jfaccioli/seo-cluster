@@ -9,16 +9,20 @@ from clustering.preprocess import normalize_text
 from clustering.embed import embed_queries
 from clustering.cluster import cluster_embeddings, to_umap
 from clustering.label import label_clusters
-from clustering.insights import score_opportunities
+from clustering.insights import score_opportunities, cluster_time_series
 from utils.export import export_csv
 
 st.set_page_config(page_title="SEO Keyword Clusters (MVP)", layout="wide")
 
+
+# --------------------------
+# Robust CSV loader for GSC
+# --------------------------
 @st.cache_data(show_spinner=False)
 def load_csv(file) -> pd.DataFrame:
     df = pd.read_csv(file)
 
-    # 1) Normalize column names (case/spacing) and support "Top queries"
+    # 1) Normalize column names (case/spacing); support "Top queries"
     cols = {c.strip().lower(): c for c in df.columns}
 
     def find(*cands):
@@ -46,7 +50,11 @@ def load_csv(file) -> pd.DataFrame:
     if date: rename[date] = "Date"
     df = df.rename(columns=rename)
 
-    # 3) Ensure numeric types (CTR can be '3.2%' or '0.032'; numbers can have commas)
+    # 3) Parse Date if present
+    if "Date" in df.columns:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+
+    # 4) Ensure numeric types (CTR can be '3.2%' or '0.032'; numbers can have commas)
     if "CTR" in df.columns:
         df["CTR"] = (
             df["CTR"]
@@ -54,9 +62,10 @@ def load_csv(file) -> pd.DataFrame:
             .str.replace("%", "", regex=False)
             .str.replace(",", "", regex=False)
         )
-        # If CTR looked like '3.2', treat as percent (3.2% -> 0.032). If already 0.032, it still works.
         ctr_numeric = pd.to_numeric(df["CTR"], errors="coerce")
+        # If CTR looked like '3.2', treat as percent (3.2% -> 0.032). If already 0.032, it stays.
         df["CTR"] = np.where(ctr_numeric > 1, ctr_numeric / 100.0, ctr_numeric)
+
     for c in ["Clicks", "Impressions", "Position"]:
         if c in df.columns:
             df[c] = pd.to_numeric(
@@ -64,13 +73,17 @@ def load_csv(file) -> pd.DataFrame:
                 errors="coerce"
             )
 
-    # 4) Fill safe defaults if any columns are missing
+    # 5) Fill safe defaults if any columns are missing
     for c, default in [("Clicks", 0), ("Impressions", 0), ("CTR", 0.0), ("Position", np.nan)]:
         if c not in df.columns:
             df[c] = default
 
     return df
 
+
+# --------------------------
+# UI
+# --------------------------
 st.title("🔎 SEO Keyword Clusters — Interactive MVP")
 st.caption("Upload a Google Search Console **Queries** CSV. Everything runs in-session; no data stored.")
 
@@ -81,12 +94,14 @@ with st.sidebar:
     brand_terms = st.text_input("Brand terms (comma-separated, optional)", value="")
     do_norm = st.checkbox("Normalize queries (lowercase & trim)", value=True)
     show_umap = st.checkbox("Show 2D Map (slower)", value=False)
+    trend_metric = st.selectbox("Trend metric", options=["Impressions", "Clicks"], index=0)
     st.markdown("---")
     st.caption("Tip: raise Min Impressions for big CSVs (>20k rows).")
 
 uploaded = st.file_uploader("Upload GSC Queries CSV", type=["csv"])
 
 if uploaded is not None:
+    # -------- Load & prep
     try:
         raw = load_csv(uploaded)
     except Exception as e:
@@ -97,7 +112,7 @@ if uploaded is not None:
     df = df[df["Impressions"].fillna(0) >= min_impr].reset_index(drop=True)
     df["Query_norm"] = df["Query"].astype(str).map(normalize_text) if do_norm else df["Query"].astype(str)
 
-    # Exclude brand terms if provided
+    # Brand exclusions
     if brand_terms.strip():
         brands = [b.strip().lower() for b in brand_terms.split(",") if b.strip()]
         pattern = "|".join([re.escape(b) for b in brands])
@@ -106,6 +121,7 @@ if uploaded is not None:
     else:
         df_nb = df.copy()
 
+    # -------- Embed & cluster
     with st.spinner("Embedding queries…"):
         embeddings = embed_queries(df_nb["Query_norm"].tolist())
 
@@ -114,11 +130,12 @@ if uploaded is not None:
     df_nb["cluster_id"] = cl_labels
     df_nb["cluster_prob"] = probabilities
 
+    # -------- Label clusters
     with st.spinner("Naming clusters…"):
         labels_df = label_clusters(df_nb, text_col="Query_norm", cluster_col="cluster_id")
     df_nb = df_nb.merge(labels_df, on="cluster_id", how="left")
 
-    # Aggregate summary (note: 'CTR' is the column name)
+    # -------- Aggregate summary
     clusters = (
         df_nb.groupby(["cluster_id", "cluster_label"], dropna=False)
         .agg(
@@ -132,14 +149,37 @@ if uploaded is not None:
         .sort_values(["impressions", "clicks"], ascending=[False, False])
     )
 
+    # -------- Trend sparkline (if Date available)
+    trend_df = cluster_time_series(df_nb, metric=trend_metric)
+    if trend_df is not None and not trend_df.empty:
+        clusters = clusters.merge(
+            trend_df[["cluster_id", "cluster_label", "trend"]],
+            on=["cluster_id", "cluster_label"], how="left"
+        )
+        st.subheader("📊 Clusters")
+        st.dataframe(
+            clusters,
+            use_container_width=True,
+            column_config={
+                "trend": st.column_config.LineChartColumn(
+                    "Trend",
+                    help=f"Weekly {trend_metric.lower()} per cluster (sparkline)",
+                    y_min=0,
+                )
+            }
+        )
+    else:
+        if "Date" not in df_nb.columns or df_nb["Date"].isna().all():
+            st.info("No **Date** column found, so trends are disabled. Export a GSC report with both **Date** and **Query** dimensions to see cluster trends.")
+        st.subheader("📊 Clusters")
+        st.dataframe(clusters, use_container_width=True)
+
+    # -------- Opportunities
     opp = score_opportunities(clusters)
-
-    st.subheader("📊 Clusters")
-    st.dataframe(clusters, use_container_width=True)
-
     st.subheader("💡 Opportunities")
     st.dataframe(opp, use_container_width=True)
 
+    # -------- Optional map
     if show_umap:
         with st.spinner("Building 2D map…"):
             try:
@@ -157,11 +197,13 @@ if uploaded is not None:
             except Exception as e:
                 st.warning(f"Could not render UMAP plot: {e}")
 
+    # -------- Export
     st.download_button(
         "⬇️ Export clusters (CSV)",
         data=export_csv(clusters),
         file_name="clusters.csv",
         mime="text/csv"
     )
+
 else:
     st.info("Upload a GSC Queries CSV to get started.")
