@@ -195,8 +195,8 @@ if uploaded is not None:
             on=["cluster_id", "cluster_label"], how="left"
         )
 
-    # -------- Opportunities (from full clusters summary)
-    opp = score_opportunities(clusters)
+    # -------- Opportunities
+    opp = score_opportunities(clusters)  # columns: cluster_id, queries, clicks, impressions, ctr, position, score
 
     # ==========================
     # DASHBOARD
@@ -204,18 +204,25 @@ if uploaded is not None:
     st.header("📊 Dashboard")
 
     # KPI row
+    total_impr = float(df_nb["Impressions"].sum() or 0)
+    unclustered_impr = float(df_nb.loc[df_nb["cluster_id"] == -1, "Impressions"].sum() or 0)
+    clustered_impr = max(total_impr - unclustered_impr, 0)
+
     col1, col2, col3, col4, col5, col6 = st.columns(6)
-    with col1: kpi_card("Impressions", f"{int(df_nb['Impressions'].sum()):,}")
+    with col1: kpi_card("Impressions", f"{int(total_impr):,}")
     with col2: kpi_card("Clicks", f"{int(df_nb['Clicks'].sum()):,}")
     with col3: kpi_card("Avg CTR", f"{(df_nb['CTR'].mean()*100 if df_nb['CTR'].notna().any() else 0):.2f}%")
     with col4: kpi_card("Avg Position", f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—")
     with col5: kpi_card("# Clusters", f"{(clusters['cluster_id']!=-1).sum():,}")
     with col6:
-        share_top10 = df_nb.merge(
-            clusters.head(10)[["cluster_id"]],
-            on="cluster_id", how="inner"
-        )["Impressions"].sum() / max(df_nb["Impressions"].sum(), 1)
-        kpi_card("Top10 share", f"{share_top10*100:.1f}%")
+        # Top10 share among *clustered only* (exclude -1)
+        clustered_only = clusters[clusters["cluster_id"] != -1]
+        top10_impr = float(clustered_only.head(10)["impressions"].sum() or 0)
+        share_top10 = (top10_impr / clustered_impr) if clustered_impr > 0 else 0.0
+        kpi_card("Top10 share (clustered)", f"{share_top10*100:.1f}%")
+
+    # Show Unclustered share too
+    st.caption(f"Unclustered share: { (unclustered_impr/total_impr*100 if total_impr>0 else 0):.1f}%")
 
     # Filters on dashboard (cluster multi-select)
     clusters["_label_for_ui"] = clusters.apply(
@@ -260,12 +267,18 @@ if uploaded is not None:
     # Viz 2: Opportunity bubble (x=position, y=impressions, size=clicks, color=score)
     st.subheader("Opportunity Map — Where to act next")
     if not clusters_v.empty:
-        # Start from opp (already includes score); filter by selected clusters if any
-        opp_v = opp.copy()
+        # Merge labels to opp so hover works
+        opp_v = opp.merge(
+            clusters[["cluster_id", "cluster_label"]],
+            on="cluster_id",
+            how="left",
+            validate="many_to_one"
+        ).copy()
+
         if selected_ids:
             opp_v = opp_v[opp_v["cluster_id"].isin(selected_ids)]
 
-        # Ensure numeric types and drop rows with missing values used in the plot
+        # Ensure numeric types; drop rows with missing values used in the plot
         for c in ["position", "impressions", "clicks", "score"]:
             if c in opp_v.columns:
                 opp_v[c] = pd.to_numeric(opp_v[c], errors="coerce")
