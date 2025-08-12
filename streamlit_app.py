@@ -395,21 +395,12 @@ if uploaded is not None:
         fig_intent.update_layout(margin=dict(t=30,l=0,r=0,b=0), xaxis={'visible': False, 'showticklabels': False})
         st.plotly_chart(fig_intent, use_container_width=True)
 
-    # Viz 5: Top queries table (drilldown)
-    st.subheader("Top queries (drilldown)")
-    topq = (
-        df_vis.sort_values(["Impressions","Clicks"], ascending=[False, False])
-              [["cluster_label","Query","Clicks","Impressions","CTR","Position"]]
-              .head(500)
-    )
-    st.dataframe(topq, use_container_width=True)
-
     # ==========================
-    # CLUSTERS + OPPORTUNITIES (tables)
+    # TABLES
     # ==========================
     st.header("📋 Tables")
 
-    # Clusters table (with or without trend)
+    # Clusters table
     st.subheader("Clusters")
     if trend_df is not None and not trend_df.empty:
         st.dataframe(
@@ -426,8 +417,18 @@ if uploaded is not None:
     else:
         st.dataframe(clusters, use_container_width=True)
 
+    # Opportunities table
     st.subheader("Opportunities")
     st.dataframe(opp, use_container_width=True)
+
+    # Top queries table
+    st.subheader("Top Queries (Drilldown)")
+    topq = (
+        df_vis.sort_values(["Impressions", "Clicks"], ascending=[False, False])
+              [["cluster_label", "Query", "Clicks", "Impressions", "CTR", "Position"]]
+              .head(500)
+    )
+    st.dataframe(topq, use_container_width=True)
 
     # ==========================
     # CONTENT BRIEF
@@ -476,6 +477,7 @@ if uploaded is not None:
         if WEASYPRINT_AVAILABLE:
             if st.button("⬇️ Download PDF Report"):
                 try:
+                    avg_position_pdf = f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—"
                     html_content = f"""
                     <style>
                         body {{ font-family: Arial, sans-serif; margin: 20px; }}
@@ -490,7 +492,7 @@ if uploaded is not None:
                     <p><strong>Impressions:</strong> {int(total_impr):,}</p>
                     <p><strong>Clicks:</strong> {int(df_nb['Clicks'].sum()):,}</p>
                     <p><strong>Avg CTR:</strong> {(df_nb['CTR'].mean()*100 if df_nb['CTR'].notna().any() else 0):.2f}%</p>
-                    <p><strong>Avg Position:</strong> {df_nb['Position'].mean():.2f if df_nb['Position'].notna().any() else '—'}</p>
+                    <p><strong>Avg Position:</strong> {avg_position_pdf}</p>
                     <p><strong>Clusters:</strong> {(clusters['cluster_id'] != -1).sum():,}</p>
                     <p><strong>Top10 Share (clustered):</strong> {share_top10*100:.1f}%</p>
                     <p><strong>Unclustered Share:</strong> {(unclustered_impr/total_impr*100 if total_impr>0 else 0):.1f}%</p>
