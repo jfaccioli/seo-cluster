@@ -1,4 +1,3 @@
-# clustering/brief.py
 import re
 from typing import Dict, List, Tuple
 import numpy as np
@@ -89,6 +88,10 @@ def build_content_brief(
     if data.empty:
         return "# Content Brief\n\n_No data in this cluster._"
 
+    # Ensure cluster_label is a valid string
+    if not isinstance(cluster_label, str) or not cluster_label.strip():
+        cluster_label = f"Cluster {cluster_id}"
+
     # keyphrases (title/H1/H2 seeds)
     keyphrases = _ctfidf_top_phrases(data["Query_norm"].tolist(), top_k=top_phrases_k)
 
@@ -119,16 +122,15 @@ def build_content_brief(
 
     # Title / H1 ideas
     title_opts = []
-    if cluster_label and cluster_label.strip():
-        title_opts.append(f"{cluster_label.title()} | Comprehensive Guide")
-        title_opts.append(f"{cluster_label.title()} — Services, Costs & Eligibility")
+    title_opts.append(f"{cluster_label.title()} | Comprehensive Guide")
+    title_opts.append(f"{cluster_label.title()} — Services, Costs & Eligibility")
     for p in keyphrases[:3]:
         title_opts.append(f"{p.title()} in WA")
     title_opts = list(dict.fromkeys([t for t in title_opts if len(t) > 10]))[:4]
 
     # Build Markdown
     md = []
-    md.append(f"# Content Brief: {cluster_label or 'Cluster ' + str(cluster_id)}")
+    md.append(f"# Content Brief: {cluster_label}")
     md.append("")
     md.append(f"**Cluster ID:** {cluster_id}")
     md.append(f"**Queries:** {len(data)}  ·  **Clicks:** {int(data['Clicks'].sum())}  ·  **Impressions:** {int(data['Impressions'].sum())}  ·  **Avg Pos:** {round(data['Position'].mean(),1) if not np.isnan(data['Position'].mean()) else '—'}")
