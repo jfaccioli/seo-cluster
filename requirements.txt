@@ -9,3 +9,4 @@ plotly>=5.22
 google-api-python-client>=2.137.0
 google-auth>=2.34.0
 google-auth-oauthlib>=1.2.1
+weasyprint
