@@ -259,9 +259,10 @@ if uploaded is not None:
 
     # Debug: Log clusters shape and KPI values
     st.write(f"Debug: clusters shape: {clusters.shape}")
+    avg_position = f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—"
     st.write(f"Debug: KPI values - Impressions: {int(total_impr):,}, Clicks: {int(df_nb['Clicks'].sum()):,}, "
              f"Avg CTR: {(df_nb['CTR'].mean()*100 if df_nb['CTR'].notna().any() else 0):.2f}%, "
-             f"Avg Position: {df_nb['Position'].mean():.2f if df_nb['Position'].notna().any() else '—'}, "
+             f"Avg Position: {avg_position}, "
              f"Num Clusters: {(clusters['cluster_id'] != -1).sum():,}")
 
     col1, col2, col3, col4, col5, col6 = st.columns(6)
