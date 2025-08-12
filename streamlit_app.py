@@ -41,21 +41,21 @@ def load_csv(file) -> pd.DataFrame:
         return None
 
     q_col = find("query", "top queries")
-    clk   = find("clicks")
-    impr  = find("impressions")
-    ctr   = find("ctr")
-    pos   = find("position")
-    date  = find("date")
+    clk = find("clicks")
+    impr = find("impressions")
+    ctr = find("ctr")
+    pos = find("position")
+    date = find("date")
 
     if not q_col:
         raise ValueError("CSV must include a 'Query' or 'Top queries' column from GSC export.")
 
     # 2) Rename to a stable schema
     rename = {q_col: "Query"}
-    if clk:  rename[clk]  = "Clicks"
+    if clk: rename[clk] = "Clicks"
     if impr: rename[impr] = "Impressions"
-    if ctr:  rename[ctr]  = "CTR"
-    if pos:  rename[pos]  = "Position"
+    if ctr: rename[ctr] = "CTR"
+    if pos: rename[pos] = "Position"
     if date: rename[date] = "Date"
     df = df.rename(columns=rename)
 
@@ -257,20 +257,24 @@ if uploaded is not None:
     unclustered_impr = float(df_nb.loc[df_nb["cluster_id"] == -1, "Impressions"].sum() or 0)
     clustered_impr = max(total_impr - unclustered_impr, 0)
 
-    # Debug: Log clusters shape
+    # Debug: Log clusters shape and KPI values
     st.write(f"Debug: clusters shape: {clusters.shape}")
+    st.write(f"Debug: KPI values - Impressions: {int(total_impr):,}, Clicks: {int(df_nb['Clicks'].sum()):,}, "
+             f"Avg CTR: {(df_nb['CTR'].mean()*100 if df_nb['CTR'].notna().any() else 0):.2f}%, "
+             f"Avg Position: {df_nb['Position'].mean():.2f if df_nb['Position'].notna().any() else '—'}, "
+             f"Num Clusters: {(clusters['cluster_id'] != -1).sum():,}")
 
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     with col1:
-        kpi_card("Impressions", f"{int(total_impr):,}")
+        kpi_card("Impressions", str(int(total_impr)))
     with col2:
-        kpi_card("Clicks", f"{int(df_nb['Clicks'].sum()):,}")
+        kpi_card("Clicks", str(int(df_nb["Clicks"].sum())))
     with col3:
         kpi_card("Avg CTR", f"{(df_nb['CTR'].mean()*100 if df_nb['CTR'].notna().any() else 0):.2f}%")
     with col4:
-        kpi_card("Avg Position", f"{df_nb['Position'].mean():.2f if df_nb['Position'].notna().any() else '—'}")
+        kpi_card("Avg Position", f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—")
     with col5:
-        kpi_card("Num Clusters", f"{(clusters['cluster_id'] != -1).sum():,}")
+        kpi_card("Num Clusters", str((clusters["cluster_id"] != -1).sum()))
     with col6:
         clustered_only = clusters[clusters["cluster_id"] != -1]
         top10_impr = float(clustered_only.head(10)["impressions"].sum() or 0)
