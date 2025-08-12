@@ -284,6 +284,9 @@ if uploaded is not None:
     # Show Unclustered share
     st.caption(f"Unclustered share: {(unclustered_impr/total_impr*100 if total_impr>0 else 0):.1f}%")
 
+    # Show Unclustered share
+    st.caption(f"Unclustered share: {(unclustered_impr/total_impr*100 if total_impr>0 else 0):.1f}%")
+
     # Filters on dashboard (cluster multi-select)
     clusters["_label_for_ui"] = clusters.apply(
         lambda r: f"[{int(r['cluster_id'])}] {r['cluster_label'] or ''}".strip(),
