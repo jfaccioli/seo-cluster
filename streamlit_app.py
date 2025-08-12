@@ -116,6 +116,7 @@ with st.sidebar:
     trend_metric = st.selectbox("Trend metric", options=["Impressions", "Clicks"], index=0)
     st.markdown("---")
     st.caption("Tip: raise Min Impressions for big CSVs (>20k rows).")
+    st.caption("Use 'Re-cluster Unclustered' button if unclustered share is high (>50%) to find finer groups.")
 
 uploaded = st.file_uploader("Upload GSC Queries CSV", type=["csv"])
 
@@ -170,7 +171,6 @@ if uploaded is not None:
     )
 
     # Re-cluster unclustered button
-    st.caption("If unclustered share is high (>50%), try re-clustering below for finer groups.")
     if st.button("Re-cluster Unclustered Queries (with smaller min size)"):
         unclustered = df_nb[df_nb["cluster_id"] == -1].copy()
         if not unclustered.empty:
@@ -192,12 +192,19 @@ if uploaded is not None:
                 unclustered["cluster_label"] = unclustered["cluster_label"].fillna("")
                 unclustered["cluster_label"] = np.where(
                     unclustered["cluster_id"] == -1,
-                    "Still Unclustered",
+                    "Remaining Unclustered",
                     unclustered["cluster_label"]
                 )
                 # Update original df_nb with re-clustered rows
                 df_nb.update(unclustered)
-                st.success("Unclustered queries re-processed! Refresh visuals below.")
+                # Count re-clustered vs remaining
+                new_clusters = unclustered[unclustered["cluster_id"] != -1]["cluster_id"].nunique()
+                remaining_unclustered = len(unclustered[unclustered["cluster_id"] == -1])
+                total_reclustered = len(unclustered)
+                st.success(
+                    f"Re-clustered {total_reclustered} queries: {new_clusters} new clusters formed, "
+                    f"{remaining_unclustered} remain unclustered. Refresh visuals below."
+                )
 
     # Intent tagging for dashboard breakdowns
     df_nb["intent"] = df_nb["Query_norm"].map(intent_bucket)
@@ -242,8 +249,8 @@ if uploaded is not None:
     with col1: kpi_card("Impressions", f"{int(total_impr):,}")
     with col2: kpi_card("Clicks", f"{int(df_nb['Clicks'].sum()):,}")
     with col3: kpi_card("Avg CTR", f"{(df_nb['CTR'].mean()*100 if df_nb['CTR'].notna().any() else 0):.2f}%")
-    with col4: kpi_card("Avg Position", f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—")
-    with col5: kpi_card("# Clusters", f"{(clusters['cluster_id']!=-1).sum():,}")
+    with col4: kpi_card("Avg Position", f"{df_nb['Position'].mean():.2f}" if df_df["Position"].notna().any() else "—")
+    with col5: kpi_card("# Clusters", f"{(clusters['cluster_id'] != -1).sum():,}")
     with col6:
         # Top10 share among *clustered only* (exclude -1)
         clustered_only = clusters[clusters["cluster_id"] != -1]
@@ -413,25 +420,32 @@ if uploaded is not None:
         sel = st.selectbox("Choose a cluster for a brief", options=clusters["_label_for_ui2"].tolist())
         chosen_id = int(sel.split("]")[0].strip("[")) if sel else None
         chosen_row = clusters[clusters["cluster_id"] == chosen_id].head(1)
-        chosen_label = chosen_row["cluster_label"].iloc(0) if not chosen_row.empty else ""
+        chosen_label = chosen_row["cluster_label"].iloc[0] if not chosen_row.empty else ""
+        # Ensure chosen_label is a valid string
+        if pd.isna(chosen_label) or not isinstance(chosen_label, str) or not chosen_label.strip():
+            st.warning(f"Invalid cluster label for ID {chosen_id}. Using fallback label.")
+            chosen_label = f"Cluster {chosen_id}"
 
         if chosen_id == -1:
             st.info("This is the **Unclustered** group. It contains mixed queries, so a single content brief isn’t useful. Adjust filters or clustering settings to reduce noise.")
         else:
             df_cluster = df_nb[df_nb["cluster_id"] == chosen_id].copy()
-            brief_md = build_content_brief(
-                df_cluster=df_cluster,
-                cluster_id=chosen_id,
-                cluster_label=chosen_label,
-                centroids=None  # optional
-            )
-            st.markdown(brief_md)
-            st.download_button(
-                "⬇️ Download brief (Markdown)",
-                data=brief_md.encode("utf-8"),
-                file_name=f"content-brief-cluster-{chosen_id}.md",
-                mime="text/markdown"
-            )
+            try:
+                brief_md = build_content_brief(
+                    df_cluster=df_cluster,
+                    cluster_id=chosen_id,
+                    cluster_label=chosen_label,
+                    centroids=None  # optional
+                )
+                st.markdown(brief_md)
+                st.download_button(
+                    "⬇️ Download brief (Markdown)",
+                    data=brief_md.encode("utf-8"),
+                    file_name=f"content-brief-cluster-{chosen_id}.md",
+                    mime="text/markdown"
+                )
+            except Exception as e:
+                st.error(f"Failed to generate content brief: {str(e)}")
 
     # Export summary
     st.download_button(
