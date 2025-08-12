@@ -266,15 +266,15 @@ if uploaded is not None:
 
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     with col1:
-        kpi_card("Impressions", str(int(total_impr)))
+        kpi_card("Impressions", f"{int(total_impr):,}")
     with col2:
-        kpi_card("Clicks", str(int(df_nb["Clicks"].sum())))
+        kpi_card("Clicks", f"{int(df_nb['Clicks'].sum()):,}")
     with col3:
         kpi_card("Avg CTR", f"{(df_nb['CTR'].mean()*100 if df_nb['CTR'].notna().any() else 0):.2f}%")
     with col4:
         kpi_card("Avg Position", f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—")
     with col5:
-        kpi_card("Num Clusters", str((clusters["cluster_id"] != -1).sum()))
+        kpi_card("Num Clusters", f"{(clusters['cluster_id'] != -1).sum():,}")
     with col6:
         clustered_only = clusters[clusters["cluster_id"] != -1]
         top10_impr = float(clustered_only.head(10)["impressions"].sum() or 0)
