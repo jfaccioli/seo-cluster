@@ -284,9 +284,6 @@ if uploaded is not None:
     # Show Unclustered share
     st.caption(f"Unclustered share: {(unclustered_impr/total_impr*100 if total_impr>0 else 0):.1f}%")
 
-    # Show Unclustered share
-    st.caption(f"Unclustered share: {(unclustered_impr/total_impr*100 if total_impr>0 else 0):.1f}%")
-
     # Filters on dashboard (cluster multi-select)
     clusters["_label_for_ui"] = clusters.apply(
         lambda r: f"[{int(r['cluster_id'])}] {r['cluster_label'] or ''}".strip(),
@@ -454,7 +451,7 @@ if uploaded is not None:
 
         brief_md = ""
         if chosen_id == -1:
-            st.info("This is the **Unclustered** group. It contains mixed queries, so a single content brief isn't useful. Adjust filters or clustering settings to reduce noise.")
+            st.info("This is the **Unclustered** group. It contains mixed queries, so a single content brief isn’t useful. Adjust filters or clustering settings to reduce noise.")
         else:
             df_cluster = df_nb[df_nb["cluster_id"] == chosen_id].copy()
             try:
