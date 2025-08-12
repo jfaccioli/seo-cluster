@@ -170,6 +170,7 @@ if uploaded is not None:
     )
 
     # Re-cluster unclustered button
+    st.caption("If unclustered share is high (>50%), try re-clustering below for finer groups.")
     if st.button("Re-cluster Unclustered Queries (with smaller min size)"):
         unclustered = df_nb[df_nb["cluster_id"] == -1].copy()
         if not unclustered.empty:
@@ -185,10 +186,14 @@ if uploaded is not None:
                     weight_col="Impressions"
                 )
                 unclustered = unclustered.merge(labels_uncl, on="cluster_id", how="left")
+                # Ensure cluster_label exists and handle NaNs
+                if "cluster_label" not in unclustered.columns:
+                    unclustered["cluster_label"] = ""
+                unclustered["cluster_label"] = unclustered["cluster_label"].fillna("")
                 unclustered["cluster_label"] = np.where(
                     unclustered["cluster_id"] == -1,
                     "Still Unclustered",
-                    unclustered["cluster_label"].fillna("")
+                    unclustered["cluster_label"]
                 )
                 # Update original df_nb with re-clustered rows
                 df_nb.update(unclustered)
