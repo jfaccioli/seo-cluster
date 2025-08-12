@@ -267,22 +267,24 @@ if uploaded is not None:
     # Viz 2: Opportunity bubble (x=position, y=impressions, size=clicks, color=score)
     st.subheader("Opportunity Map — Where to act next")
     if not clusters_v.empty:
-        # Merge labels to opp so hover works
-        opp_v = opp.merge(
-            clusters[["cluster_id", "cluster_label"]],
-            on="cluster_id",
-            how="left",
-            validate="many_to_one"
-        ).copy()
+        # No need to merge—opp already has cluster_label from clusters
+        opp_v = opp.copy()
 
         if selected_ids:
             opp_v = opp_v[opp_v["cluster_id"].isin(selected_ids)]
 
-        # Ensure numeric types; drop rows with missing values used in the plot
-        for c in ["position", "impressions", "clicks", "score"]:
+        # Ensure numeric types and handle missing/invalid values
+        required_cols = ["position", "impressions", "clicks", "score"]
+        for c in required_cols:
             if c in opp_v.columns:
                 opp_v[c] = pd.to_numeric(opp_v[c], errors="coerce")
-        opp_v = opp_v.replace([np.inf, -np.inf], np.nan).dropna(subset=["position", "impressions", "clicks", "score"])
+            else:
+                st.error(f"Missing required column: {c}")
+                st.stop()
+
+        # Replace infinities and drop rows with NaN in required columns (add cluster_label to ensure hover_name works)
+        opp_v = opp_v.replace([np.inf, -np.inf], np.nan)
+        opp_v = opp_v.dropna(subset=required_cols + ["cluster_label"])
 
         if opp_v.empty:
             st.info("No data for the Opportunity Map with current filters.")
