@@ -3,6 +3,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from typing import List
+from weasyprint import HTML
+import io
 
 # Local modules
 from clustering.preprocess import normalize_text
@@ -117,6 +119,7 @@ with st.sidebar:
     st.markdown("---")
     st.caption("Tip: raise Min Impressions for big CSVs (>20k rows).")
     st.caption("Use 'Re-cluster Unclustered' button if unclustered share is high (>50%) to find finer groups.")
+    st.caption("Download PDF reports for professional summaries under Content Brief.")
 
 uploaded = st.file_uploader("Upload GSC Queries CSV", type=["csv"])
 
@@ -176,7 +179,7 @@ if uploaded is not None:
         if not unclustered.empty:
             with st.spinner("Re-clustering unclustered queries…"):
                 embeddings_uncl = embed_queries(unclustered["Query_norm"].tolist())
-                cl_labels_uncl, probs_uncl = cluster_embeddings(embeddings_uncl, min_cluster_size=3)
+                cl_labels_uncl, probs_uncl = cluster_embeddings(embedings_uncl, min_cluster_size=3)
                 unclustered["cluster_id"] = cl_labels_uncl
                 unclustered["cluster_prob"] = probs_uncl
                 labels_uncl = label_clusters(
@@ -249,7 +252,7 @@ if uploaded is not None:
     with col1: kpi_card("Impressions", f"{int(total_impr):,}")
     with col2: kpi_card("Clicks", f"{int(df_nb['Clicks'].sum()):,}")
     with col3: kpi_card("Avg CTR", f"{(df_nb['CTR'].mean()*100 if df_nb['CTR'].notna().any() else 0):.2f}%")
-    with col4: kpi_card("Avg Position", f"{df_nb['Position'].mean():.2f}" if df_df["Position"].notna().any() else "—")
+    with col4: kpi_card("Avg Position", f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—")
     with col5: kpi_card("# Clusters", f"{(clusters['cluster_id'] != -1).sum():,}")
     with col6:
         # Top10 share among *clustered only* (exclude -1)
@@ -426,6 +429,7 @@ if uploaded is not None:
             st.warning(f"Invalid cluster label for ID {chosen_id}. Using fallback label.")
             chosen_label = f"Cluster {chosen_id}"
 
+        brief_md = ""
         if chosen_id == -1:
             st.info("This is the **Unclustered** group. It contains mixed queries, so a single content brief isn’t useful. Adjust filters or clustering settings to reduce noise.")
         else:
@@ -446,6 +450,43 @@ if uploaded is not None:
                 )
             except Exception as e:
                 st.error(f"Failed to generate content brief: {str(e)}")
+
+        # PDF Export
+        if st.button("⬇️ Download PDF Report"):
+            try:
+                html_content = f"""
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                    h1 {{ color: #1f77b4; }}
+                    h2 {{ color: #333; }}
+                    table {{ border-collapse: collapse; width: 100%; }}
+                    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                    th {{ background-color: #f2f2f2; }}
+                </style>
+                <h1>SEO Cluster Report</h1>
+                <h2>Summary</h2>
+                <p><strong>Impressions:</strong> {int(total_impr):,}</p>
+                <p><strong>Clicks:</strong> {int(df_nb['Clicks'].sum()):,}</p>
+                <p><strong>Avg CTR:</strong> {(df_nb['CTR'].mean()*100 if df_nb['CTR'].notna().any() else 0):.2f}%</p>
+                <p><strong>Avg Position:</strong> {df_nb['Position'].mean():.2f if df_nb['Position'].notna().any() else '—'}</p>
+                <p><strong>Clusters:</strong> {(clusters['cluster_id'] != -1).sum():,}</p>
+                <p><strong>Top10 Share (clustered):</strong> {share_top10*100:.1f}%</p>
+                <p><strong>Unclustered Share:</strong> {(unclustered_impr/total_impr*100 if total_impr>0 else 0):.1f}%</p>
+                <h2>Clusters</h2>
+                {clusters.to_html(index=False)}
+                <h2>Selected Content Brief</h2>
+                {brief_md if brief_md else '<p>No brief selected or available.</p>'}
+                """
+                pdf_buffer = io.BytesIO()
+                HTML(string=html_content).write_pdf(pdf_buffer)
+                st.download_button(
+                    "⬇️ Download PDF Report",
+                    data=pdf_buffer.getvalue(),
+                    file_name="seo_cluster_report.pdf",
+                    mime="application/pdf"
+                )
+            except Exception as e:
+                st.error(f"Failed to generate PDF report: {str(e)}")
 
     # Export summary
     st.download_button(
