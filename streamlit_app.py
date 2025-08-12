@@ -97,7 +97,6 @@ def intent_bucket(q: str) -> str:
         return "Comparative"
     return "Informational"
 
-
 def kpi_card(label: str, value: str):
     st.metric(label=label, value=value)
 
@@ -196,19 +195,8 @@ if uploaded is not None:
             on=["cluster_id", "cluster_label"], how="left"
         )
 
-    # -------- Opportunities
+    # -------- Opportunities (from full clusters summary)
     opp = score_opportunities(clusters)
-
-    # -------- Compute centroids per cluster (for internal link suggestions in brief)
-    centroids: dict[int, np.ndarray] = {}
-    try:
-        E = embeddings.toarray() if hasattr(embeddings, "toarray") else np.asarray(embeddings)
-        for cid, sub in df_nb.groupby("cluster_id"):
-            idxs = sub.index.values  # row positions align with E because we reset_index above
-            vecs = E[idxs] if len(idxs) else None
-            centroids[cid] = vecs.mean(axis=0) if vecs is not None and vecs.size else None
-    except Exception:
-        centroids = {}
 
     # ==========================
     # DASHBOARD
@@ -229,7 +217,7 @@ if uploaded is not None:
         )["Impressions"].sum() / max(df_nb["Impressions"].sum(), 1)
         kpi_card("Top10 share", f"{share_top10*100:.1f}%")
 
-    # Filters on dashboard (cluster multi-select + metric)
+    # Filters on dashboard (cluster multi-select)
     clusters["_label_for_ui"] = clusters.apply(
         lambda r: f"[{int(r['cluster_id'])}] {r['cluster_label'] or ''}".strip(),
         axis=1
@@ -272,18 +260,32 @@ if uploaded is not None:
     # Viz 2: Opportunity bubble (x=position, y=impressions, size=clicks, color=score)
     st.subheader("Opportunity Map — Where to act next")
     if not clusters_v.empty:
-        opp_v = opp.merge(clusters_v[["cluster_id","cluster_label"]], on="cluster_id", how="inner")
-        fig_bub = px.scatter(
-            opp_v,
-            x="position", y="impressions",
-            size="clicks",
-            color="score",
-            hover_name="cluster_label",
-            size_max=60,
-            labels={"position":"Avg Position (lower is better)", "impressions":"Impressions"}
-        )
-        fig_bub.update_layout(margin=dict(t=30,l=0,r=0,b=0), xaxis_autorange="reversed")
-        st.plotly_chart(fig_bub, use_container_width=True)
+        # Start from opp (already includes score); filter by selected clusters if any
+        opp_v = opp.copy()
+        if selected_ids:
+            opp_v = opp_v[opp_v["cluster_id"].isin(selected_ids)]
+
+        # Ensure numeric types and drop rows with missing values used in the plot
+        for c in ["position", "impressions", "clicks", "score"]:
+            if c in opp_v.columns:
+                opp_v[c] = pd.to_numeric(opp_v[c], errors="coerce")
+        opp_v = opp_v.replace([np.inf, -np.inf], np.nan).dropna(subset=["position", "impressions", "clicks", "score"])
+
+        if opp_v.empty:
+            st.info("No data for the Opportunity Map with current filters.")
+        else:
+            fig_bub = px.scatter(
+                opp_v,
+                x="position",
+                y="impressions",
+                size="clicks",
+                color="score",
+                hover_name="cluster_label",
+                size_max=60,
+                labels={"position": "Avg Position (lower is better)", "impressions": "Impressions"}
+            )
+            fig_bub.update_layout(margin=dict(t=30, l=0, r=0, b=0), xaxis_autorange="reversed")
+            st.plotly_chart(fig_bub, use_container_width=True)
     else:
         st.info("No opportunities to display.")
 
@@ -376,7 +378,7 @@ if uploaded is not None:
                 df_cluster=df_cluster,
                 cluster_id=chosen_id,
                 cluster_label=chosen_label,
-                centroids=None  # centroids optional for now
+                centroids=None  # optional
             )
             st.markdown(brief_md)
             st.download_button(
