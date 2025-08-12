@@ -2,22 +2,26 @@ import re
 from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
-from sklearn.feature_extraction.text import CountVectorizer
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 
 WH_WORDS = r"^(who|what|when|where|why|how|can|does|do|is|are|should)\b"
 
-def _ctfidf_top_phrases(texts: List[str], top_k: int = 10) -> List[str]:
+def _semantic_top_phrases(texts: List[str], top_k: int = 10, model_name: str = "distilbert-base-uncased") -> List[str]:
     if not texts:
         return []
-    docs = [" ".join(texts)]
-    cv = CountVectorizer(ngram_range=(1,3), stop_words="english", min_df=1)
-    X = cv.fit_transform(docs)
-    terms = cv.get_feature_names_out()
-    tf = X.toarray()
-    # since single doc, c-TFIDF reduces to term frequency — still fine for small briefs
-    idx = tf[0].argsort()[::-1]
-    tops = [terms[i] for i in idx[: top_k*2] if len(terms[i]) > 1]
-    # dedupe near-duplicates by simple containment
+    # Load lightweight model (already in requirements)
+    model = SentenceTransformer(model_name)
+    # Embed queries
+    embeddings = model.encode(texts, convert_to_numpy=True)
+    # Compute centroid (mean embedding)
+    centroid = np.mean(embeddings, axis=0, keepdims=True)
+    # Calculate cosine similarity to centroid
+    similarities = cosine_similarity(embeddings, centroid).flatten()
+    # Sort by similarity
+    idx = np.argsort(similarities)[::-1]
+    # Dedupe similar phrases
+    tops = [texts[i] for i in idx[:top_k*2]]
     out = []
     for t in tops:
         if not any(t in o or o in t for o in out):
@@ -60,10 +64,10 @@ def nearest_clusters(
     target_id: int,
     top_n: int = 5
 ) -> List[int]:
-    if target_id not in centroids: 
+    if target_id not in centroids:
         return []
     keys = [k for k in centroids.keys() if k != target_id and k != -1]
-    if not keys: 
+    if not keys:
         return []
     A = centroids[target_id]
     sims = []
@@ -93,7 +97,7 @@ def build_content_brief(
         cluster_label = f"Cluster {cluster_id}"
 
     # keyphrases (title/H1/H2 seeds)
-    keyphrases = _ctfidf_top_phrases(data["Query_norm"].tolist(), top_k=top_phrases_k)
+    keyphrases = _semantic_top_phrases(data["Query_norm"].tolist(), top_k=top_phrases_k)
 
     # intents & buckets
     data["intent"] = data["Query_norm"].map(_intent_bucket)
@@ -105,12 +109,14 @@ def build_content_brief(
 
     # H2s from buckets + phrases
     buckets = (data.groupby("intent")["Query"]
-                  .apply(lambda s: list(s)[:5])  # sample a few queries for each H2
-                  .to_dict())
-    # pick 4–6 H2 suggestions from buckets names and keyphrases
+               .apply(lambda s: list(s)[:5])
+               .to_dict())
     h2_from_buckets = [f"{k}" for k in buckets.keys()]
     h2_from_phrases = [p.title() for p in keyphrases[:6]]
     h2_suggestions = list(dict.fromkeys(h2_from_buckets + h2_from_phrases))[:6]
+
+    # Related topics (semantic expansion)
+    related_topics = [p for p in keyphrases[3:8] if p not in h2_suggestions]
 
     # page type & word count
     page_type, min_words, max_words = _suggest_page_type(data["intent"], len(data))
@@ -145,6 +151,10 @@ def build_content_brief(
     md.append("## Key Phrases to Work In")
     md.append(_format_md_list([p.title() for p in keyphrases]) if keyphrases else "_(auto)_")
     md.append("")
+    if related_topics:
+        md.append("## Related Topics to Consider")
+        md.append(_format_md_list([p.title() for p in related_topics]))
+        md.append("")
     if faqs:
         md.append("## FAQs to Answer")
         md.append(_format_md_list([q.rstrip("?") + "?" for q in faqs]))
