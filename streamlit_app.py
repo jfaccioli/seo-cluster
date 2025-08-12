@@ -451,7 +451,7 @@ if uploaded is not None:
 
         brief_md = ""
         if chosen_id == -1:
-            st.info("This is the **Unclustered** group. It contains mixed queries, so a single content brief isn’t useful. Adjust filters or clustering settings to reduce noise.")
+            st.info("This is the **Unclustered** group. It contains mixed queries, so a single content brief isn't useful. Adjust filters or clustering settings to reduce noise.")
         else:
             df_cluster = df_nb[df_nb["cluster_id"] == chosen_id].copy()
             try:
