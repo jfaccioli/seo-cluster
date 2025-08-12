@@ -169,6 +169,31 @@ if uploaded is not None:
         df_nb["cluster_label"].fillna("")
     )
 
+    # Re-cluster unclustered button
+    if st.button("Re-cluster Unclustered Queries (with smaller min size)"):
+        unclustered = df_nb[df_nb["cluster_id"] == -1].copy()
+        if not unclustered.empty:
+            with st.spinner("Re-clustering unclustered queries…"):
+                embeddings_uncl = embed_queries(unclustered["Query_norm"].tolist())
+                cl_labels_uncl, probs_uncl = cluster_embeddings(embeddings_uncl, min_cluster_size=3)
+                unclustered["cluster_id"] = cl_labels_uncl
+                unclustered["cluster_prob"] = probs_uncl
+                labels_uncl = label_clusters(
+                    unclustered,
+                    text_col="Query_norm",
+                    cluster_col="cluster_id",
+                    weight_col="Impressions"
+                )
+                unclustered = unclustered.merge(labels_uncl, on="cluster_id", how="left")
+                unclustered["cluster_label"] = np.where(
+                    unclustered["cluster_id"] == -1,
+                    "Still Unclustered",
+                    unclustered["cluster_label"].fillna("")
+                )
+                # Update original df_nb with re-clustered rows
+                df_nb.update(unclustered)
+                st.success("Unclustered queries re-processed! Refresh visuals below.")
+
     # Intent tagging for dashboard breakdowns
     df_nb["intent"] = df_nb["Query_norm"].map(intent_bucket)
 
@@ -383,7 +408,7 @@ if uploaded is not None:
         sel = st.selectbox("Choose a cluster for a brief", options=clusters["_label_for_ui2"].tolist())
         chosen_id = int(sel.split("]")[0].strip("[")) if sel else None
         chosen_row = clusters[clusters["cluster_id"] == chosen_id].head(1)
-        chosen_label = chosen_row["cluster_label"].iloc[0] if not chosen_row.empty else ""
+        chosen_label = chosen_row["cluster_label"].iloc(0) if not chosen_row.empty else ""
 
         if chosen_id == -1:
             st.info("This is the **Unclustered** group. It contains mixed queries, so a single content brief isn’t useful. Adjust filters or clustering settings to reduce noise.")
