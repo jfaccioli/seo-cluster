@@ -4,14 +4,19 @@ import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 from transformers import pipeline, GPT2LMHeadModel, GPT2Tokenizer
-from sklearn.metrics.pairwise import cosine_similarity
+import torch
 import markdown
 
 WH_WORDS = r"^(who|what|when|where|why|how|can|does|do|is|are|should)\b"
 
-# Initialize models
+# Initialize models with device handling
+try:
+    device = 0 if torch.cuda.is_available() else -1
+except Exception as e:
+    print(f"CUDA check failed: {e}, falling back to CPU (-1)")
+    device = -1
 semantic_model = SentenceTransformer("distilbert-base-uncased")
-generator = pipeline("text-generation", model="gpt2", tokenizer="gpt2", device=0 if torch.cuda.is_available() else -1)
+generator = pipeline("text-generation", model="gpt2", tokenizer="gpt2", device=device)
 
 def _semantic_top_phrases(texts: List[str], top_k: int = 10) -> List[str]:
     if not texts:
