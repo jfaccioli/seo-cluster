@@ -12,7 +12,7 @@ WH_WORDS = r"^(who|what|when|where|why|how|can|does|do|is|are|should)\b"
 semantic_model = SentenceTransformer("distilbert-base-uncased")
 
 def _semantic_top_phrases(texts: List[str], top_k: int = 10) -> List[str]:
-    if not texts:
+    if len(texts) == 0:
         return []
     embeddings = semantic_model.encode(texts, convert_to_numpy=True)
     centroid = np.mean(embeddings, axis=0, keepdims=True)
@@ -93,83 +93,86 @@ def build_content_brief(
     if not isinstance(cluster_label, str) or not cluster_label.strip():
         cluster_label = f"Cluster {cluster_id}"
 
-    # Key phrases using CountVectorizer and semantic filtering
-    vectorizer = CountVectorizer(ngram_range=(1, 3), stop_words="english", min_df=1)
-    docs = [" ".join(data["Query_norm"].tolist())]
-    X = vectorizer.fit_transform(docs)
-    terms = vectorizer.get_feature_names_out() if X.shape[1] > 0 else []
-    if not terms:
-        keyphrases = _semantic_top_phrases(data["Query_norm"].tolist(), top_k=top_phrases_k)
-    else:
-        keyphrases = _semantic_top_phrases(terms, top_k=top_phrases_k)
+    try:
+        # Key phrases using CountVectorizer and semantic filtering
+        vectorizer = CountVectorizer(ngram_range=(1, 3), stop_words="english", min_df=1)
+        docs = [" ".join(data["Query_norm"].tolist())]
+        X = vectorizer.fit_transform(docs)
+        terms = vectorizer.get_feature_names_out() if X.shape[1] > 0 else []
+        if not terms:
+            keyphrases = _semantic_top_phrases(data["Query_norm"].tolist(), top_k=top_phrases_k)
+        else:
+            keyphrases = _semantic_top_phrases(terms, top_k=top_phrases_k)
 
-    # Intents & buckets
-    data["intent"] = data["Query_norm"].map(_intent_bucket)
-    buckets = data.groupby("intent")["Query"].apply(lambda s: list(s)[:5]).to_dict()
+        # Intents & buckets
+        data["intent"] = data["Query_norm"].map(_intent_bucket)
+        buckets = data.groupby("intent")["Query"].apply(lambda s: list(s)[:5]).to_dict()
 
-    # FAQs (top by impressions)
-    faq_df = data[data["intent"] == "FAQ"].copy()
-    faq_df = faq_df.sort_values("Impressions", ascending=False).head(6)
-    faqs = faq_df["Query"].tolist()
+        # FAQs (top by impressions)
+        faq_df = data[data["intent"] == "FAQ"].copy()
+        faq_df = faq_df.sort_values("Impressions", ascending=False).head(6)
+        faqs = faq_df["Query"].tolist()
 
-    # Generate titles/H1 ideas using templates
-    title_opts = [
-        f"{cluster_label} Guide: {keyphrases[0]} in WA" if keyphrases else f"{cluster_label} Guide",
-        f"{cluster_label} - Services and Costs in Perth" if keyphrases else f"{cluster_label} Overview",
-        f"Top {keyphrases[0]} Options in Australia" if keyphrases else f"Top {cluster_label} Tips",
-        f"How to Choose {keyphrases[0]} in 2025" if keyphrases else f"How to Choose {cluster_label}"
-    ][:4]  # Limit to 4
+        # Generate titles/H1 ideas using templates
+        title_opts = [
+            f"{cluster_label} Guide: {keyphrases[0]} in WA" if keyphrases else f"{cluster_label} Guide",
+            f"{cluster_label} - Services and Costs in Perth" if keyphrases else f"{cluster_label} Overview",
+            f"Top {keyphrases[0]} Options in Australia" if keyphrases else f"Top {cluster_label} Tips",
+            f"How to Choose {keyphrases[0]} in 2025" if keyphrases else f"How to Choose {cluster_label}"
+        ][:4]  # Limit to 4
 
-    # Generate H2 sections using intents and keyphrases
-    h2_suggestions = [
-        f"{buckets.get('FAQ', ['FAQ'])[0]}: Common Questions" if 'FAQ' in buckets else "FAQs",
-        f"{buckets.get('Informational', ['Info'])[0]} Insights" if 'Informational' in buckets else "Key Insights",
-        f"Local {keyphrases[0]} Options" if keyphrases and 'Local / Navigational' in buckets else "Local Guide",
-        f"{keyphrases[0]} Services Near You" if keyphrases and 'Transactional / Service' in buckets else "Services",
-        f"Benefits of {keyphrases[0]}" if keyphrases else "Benefits Overview",
-        f"Costs of {keyphrases[0]} in 2025" if keyphrases else "Cost Guide"
-    ][:6]  # Limit to 6
+        # Generate H2 sections using intents and keyphrases
+        h2_suggestions = [
+            f"{buckets.get('FAQ', ['FAQ'])[0]}: Common Questions" if 'FAQ' in buckets else "FAQs",
+            f"{buckets.get('Informational', ['Info'])[0]} Insights" if 'Informational' in buckets else "Key Insights",
+            f"Local {keyphrases[0]} Options" if keyphrases and 'Local / Navigational' in buckets else "Local Guide",
+            f"{keyphrases[0]} Services Near You" if keyphrases and 'Transactional / Service' in buckets else "Services",
+            f"Benefits of {keyphrases[0]}" if keyphrases else "Benefits Overview",
+            f"Costs of {keyphrases[0]} in 2025" if keyphrases else "Cost Guide"
+        ][:6]  # Limit to 6
 
-    # Related topics (semantic expansion)
-    related_topics = [p for p in keyphrases[3:8] if p not in h2_suggestions]
+        # Related topics (semantic expansion)
+        related_topics = [p for p in keyphrases[3:8] if p not in h2_suggestions]
 
-    # Page type & word count
-    page_type, min_words, max_words = _suggest_page_type(data["intent"], len(data))
+        # Page type & word count
+        page_type, min_words, max_words = _suggest_page_type(data["intent"], len(data))
 
-    # Internal links
-    link_ids = []
-    if centroids:
-        link_ids = nearest_clusters(centroids, cluster_id, top_n=5)
+        # Internal links
+        link_ids = []
+        if centroids:
+            link_ids = nearest_clusters(centroids, cluster_id, top_n=5)
 
-    # Build Markdown
-    md = []
-    md.append(f"# Content Brief: {cluster_label}")
-    md.append("")
-    md.append(f"**Cluster ID:** {cluster_id}")
-    md.append(f"**Queries:** {len(data)}  ·  **Clicks:** {int(data['Clicks'].sum())}  ·  **Impressions:** {int(data['Impressions'].sum())}  ·  **Avg Pos:** {round(data['Position'].mean(),1) if not np.isnan(data['Position'].mean()) else '—'}")
-    md.append(f"**Recommended Page Type:** {page_type}  ·  **Suggested Length:** {min_words}–{max_words} words")
-    md.append("")
-    md.append("## Title / H1 Ideas")
-    md.append(_format_md_list(title_opts) if title_opts else "_(auto-generate after content)_")
-    md.append("")
-    md.append("## H2 / Sections to Cover")
-    md.append(_format_md_list(h2_suggestions) if h2_suggestions else "_(derive from queries)_")
-    md.append("")
-    md.append("## Key Phrases to Work In")
-    md.append(_format_md_list([p.title() for p in keyphrases]) if keyphrases else "_(auto)_")
-    md.append("")
-    if related_topics:
-        md.append("## Related Topics to Consider")
-        md.append(_format_md_list([p.title() for p in related_topics]))
+        # Build Markdown
+        md = []
+        md.append(f"# Content Brief: {cluster_label}")
         md.append("")
-    if faqs:
-        md.append("## FAQs to Answer")
-        md.append(_format_md_list([q.rstrip("?") + "?" for q in faqs]))
+        md.append(f"**Cluster ID:** {cluster_id}")
+        md.append(f"**Queries:** {len(data)}  ·  **Clicks:** {int(data['Clicks'].sum())}  ·  **Impressions:** {int(data['Impressions'].sum())}  ·  **Avg Pos:** {round(data['Position'].mean(),1) if not np.isnan(data['Position'].mean()) else '—'}")
+        md.append(f"**Recommended Page Type:** {page_type}  ·  **Suggested Length:** {min_words}–{max_words} words")
         md.append("")
-    if link_ids:
-        md.append("## Internal Link Suggestions (related clusters)")
-        md.append(_format_md_list([f"Cluster {cid}" for cid in link_ids]))
+        md.append("## Title / H1 Ideas")
+        md.append(_format_md_list(title_opts) if title_opts else "_(auto-generate after content)_")
         md.append("")
-    md.append("## Example Queries in this Cluster")
-    md.append(_format_md_list(data["Query"].head(10).tolist()))
-    return "\n".join(md)
+        md.append("## H2 / Sections to Cover")
+        md.append(_format_md_list(h2_suggestions) if h2_suggestions else "_(derive from queries)_")
+        md.append("")
+        md.append("## Key Phrases to Work In")
+        md.append(_format_md_list([p.title() for p in keyphrases]) if keyphrases else "_(auto)_")
+        md.append("")
+        if related_topics:
+            md.append("## Related Topics to Consider")
+            md.append(_format_md_list([p.title() for p in related_topics]))
+            md.append("")
+        if faqs:
+            md.append("## FAQs to Answer")
+            md.append(_format_md_list([q.rstrip("?") + "?" for q in faqs]))
+            md.append("")
+        if link_ids:
+            md.append("## Internal Link Suggestions (related clusters)")
+            md.append(_format_md_list([f"Cluster {cid}" for cid in link_ids]))
+            md.append("")
+        md.append("## Example Queries in this Cluster")
+        md.append(_format_md_list(data["Query"].head(10).tolist()))
+        return "\n".join(md)
+    except Exception as e:
+        return f"# Content Brief: {cluster_label}\n\n**Error**: Failed to generate brief due to {str(e)}. Please ensure the cluster has valid data."
