@@ -88,8 +88,16 @@ def build_content_brief(
     if data.empty:
         return "# Content Brief\n\n_No data in this cluster._"
 
-    # Ensure cluster_label is a valid string
-    if not isinstance(cluster_label, str) or not cluster_label.strip():
+    # Fix: Ensure cluster_label is a valid string - handle Series/array case
+    if isinstance(cluster_label, (pd.Series, np.ndarray)):
+        # If it's a Series or array, get the first value
+        cluster_label = str(cluster_label.iloc[0] if hasattr(cluster_label, 'iloc') else cluster_label[0])
+    elif not isinstance(cluster_label, str):
+        # If it's not a string, convert it
+        cluster_label = str(cluster_label)
+
+    # Now safely check if it's empty after ensuring it's a string
+    if not cluster_label or not cluster_label.strip():
         cluster_label = f"Cluster {cluster_id}"
 
     try:
