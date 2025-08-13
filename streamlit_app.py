@@ -219,4 +219,318 @@ if uploaded is not None:
             clicks=("Clicks", "sum"),
             impressions=("Impressions", "sum"),
             ctr=("CTR", "mean"),
-            position
+            position=("Position", "mean"),
+        )
+        .reset_index()
+        .sort_values(["impressions", "clicks"], ascending=[False, False])
+    )
+
+    # -------- Trend sparkline (if Date available)
+    trend_df = cluster_time_series(df_nb, metric=trend_metric)
+    show_trend = trend_df is not None and not trend_df.empty
+    if show_trend:
+        clusters = clusters.merge(
+            trend_df[["cluster_id", "cluster_label", "trend"]],
+            on=["cluster_id", "cluster_label"], how="left"
+        )
+
+    # -------- Opportunities
+    opp = score_opportunities(clusters)  # columns: cluster_id, queries, clicks, impressions, ctr, position, score
+
+    # ==========================
+    # DASHBOARD
+    # ==========================
+    st.header("📊 Dashboard")
+
+    # KPI row
+    total_impr = float(df_nb["Impressions"].sum() or 0)
+    unclustered_impr = float(df_nb.loc[df_nb["cluster_id"] == -1, "Impressions"].sum() or 0)
+    clustered_impr = max(total_impr - unclustered_impr, 0)
+
+    # Debug: Log clusters shape and KPI values
+    st.write(f"Debug: clusters shape: {clusters.shape}")
+    st.write(f"Debug: Before re-clustering (if any): unclustered = {(df_nb['cluster_id'] == -1).sum()}")
+    avg_position = f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—"
+    st.write(f"Debug: KPI values - Impressions: {int(total_impr):,}, Clicks: {int(df_nb['Clicks'].sum()):,}, "
+             f"Avg CTR: {(df_nb['CTR'].mean()*100 if df_nb['CTR'].notna().any() else 0):.2f}%, "
+             f"Avg Position: {avg_position}, "
+             f"Num Clusters: {(clusters['cluster_id'] != -1).sum():,}")
+
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    with col1:
+        kpi_card("Impressions", f"{int(total_impr):,}")
+    with col2:
+        kpi_card("Clicks", f"{int(df_nb['Clicks'].sum()):,}")
+    with col3:
+        kpi_card("Avg CTR", f"{(df_nb['CTR'].mean()*100 if df_nb['CTR'].notna().any() else 0):.2f}%")
+    with col4:
+        kpi_card("Avg Position", f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—")
+    with col5:
+        kpi_card("Num Clusters", f"{(clusters['cluster_id'] != -1).sum():,}")
+    with col6:
+        clustered_only = clusters[clusters["cluster_id"] != -1]
+        top10_impr = float(clustered_only.head(10)["impressions"].sum() or 0)
+        share_top10 = (top10_impr / clustered_impr) if clustered_impr > 0 else 0.0
+        kpi_card("Top10 Share (clustered)", f"{share_top10*100:.1f}%")
+
+    # Show Unclustered share
+    st.caption(f"Unclustered share: {(unclustered_impr/total_impr*100 if total_impr>0 else 0):.1f}%")
+
+    # Filters on dashboard (cluster multi-select)
+    clusters["_label_for_ui"] = clusters.apply(
+        lambda r: f"[{int(r['cluster_id'])}] {r['cluster_label'] or ''}".strip(),
+        axis=1
+    )
+    sel_clusters = st.multiselect(
+        "Filter clusters (optional)",
+        options=clusters["_label_for_ui"].tolist(),
+        default=clusters["_label_for_ui"].head(10).tolist()
+    )
+    def parse_id(x: str) -> int:
+        try: return int(x.split("]")[0].strip("["))
+        except: return -9999
+    selected_ids = {parse_id(x) for x in sel_clusters} if sel_clusters else None
+
+    # Subset for visuals
+    clusters_v = clusters.copy()
+    df_vis = df_nb.copy()
+    if selected_ids:
+        clusters_v = clusters_v[clusters_v["cluster_id"].isin(selected_ids)]
+        df_vis = df_vis[df_vis["cluster_id"].isin(selected_ids)]
+
+    import plotly.express as px
+
+    # Viz 1: Treemap (size=Impressions, color=CTR)
+    st.subheader("Treemap — Cluster scale & CTR")
+    if not clusters_v.empty:
+        fig_tm = px.treemap(
+            clusters_v,
+            path=["cluster_label"],
+            values="impressions",
+            color="ctr",
+            color_continuous_scale="Blues",
+            hover_data={"queries": True, "clicks": True, "position": True, "ctr": True}
+        )
+        fig_tm.update_layout(margin=dict(t=30,l=0,r=0,b=0))
+        st.plotly_chart(fig_tm, use_container_width=True)
+    else:
+        st.info("No clusters to show. Try adjusting filters.")
+
+    # Viz 2: Opportunity bubble (x=position, y=impressions, size=clicks, color=score)
+    st.subheader("Opportunity Map — Where to act next")
+    if not clusters_v.empty:
+        # No need to merge—opp already has cluster_label from clusters
+        opp_v = opp.copy()
+
+        if selected_ids:
+            opp_v = opp_v[opp_v["cluster_id"].isin(selected_ids)]
+
+        # Ensure numeric types and handle missing/invalid values
+        required_cols = ["position", "impressions", "clicks", "score"]
+        for c in required_cols:
+            if c in opp_v.columns:
+                opp_v[c] = pd.to_numeric(opp_v[c], errors="coerce")
+            else:
+                st.error(f"Missing required column: {c}")
+                st.stop()
+
+        # Replace infinities and drop rows with NaN in required columns (add cluster_label to ensure hover_name works)
+        opp_v = opp_v.replace([np.inf, -np.inf], np.nan)
+        opp_v = opp_v.dropna(subset=required_cols + ["cluster_label"])
+
+        if opp_v.empty:
+            st.info("No data for the Opportunity Map with current filters.")
+        else:
+            fig_bub = px.scatter(
+                opp_v,
+                x="position",
+                y="impressions",
+                size="clicks",
+                color="score",
+                hover_name="cluster_label",
+                size_max=60,
+                labels={"position": "Avg Position (lower is better)", "impressions": "Impressions"}
+            )
+            fig_bub.update_layout(margin=dict(t=30, l=0, r=0, b=0), xaxis_autorange="reversed")
+            st.plotly_chart(fig_bub, use_container_width=True)
+    else:
+        st.info("No opportunities to display.")
+
+    # Viz 3: Trend line (if Date available)
+    if "Date" in df_vis.columns and df_vis["Date"].notna().any():
+        st.subheader(f"Trend — {trend_metric} by cluster")
+        ts = (
+            df_vis.dropna(subset=["Date"])
+                 .groupby([pd.Grouper(key="Date", freq="W-MON"), "cluster_label"], dropna=False)
+                 .agg(val=(trend_metric, "sum"))
+                 .reset_index()
+        )
+        if not ts.empty:
+            fig_line = px.line(ts, x="Date", y="val", color="cluster_label",
+                               labels={"val": trend_metric})
+            fig_line.update_layout(margin=dict(t=30,l=0,r=0,b=0))
+            st.plotly_chart(fig_line, use_container_width=True)
+        else:
+            st.info("No dated data to plot trends.")
+    else:
+        st.info("No **Date** column found in CSV, so trend charts are hidden. Export a Date+Query GSC report to enable.")
+
+    # Viz 4: Intent breakdown
+    st.subheader("Intent breakdown")
+    if not df_vis.empty:
+        intent_pivot = (
+            df_vis.groupby(["cluster_label","intent"])
+                  .size().reset_index(name="count")
+        )
+        fig_intent = px.bar(intent_pivot, x="cluster_label", y="count", color="intent", barmode="stack")
+        fig_intent.update_layout(margin=dict(t=30,l=0,r=0,b=0), xaxis={'visible': False, 'showticklabels': False})
+        st.plotly_chart(fig_intent, use_container_width=True)
+
+    # ==========================
+    # TABLES
+    # ==========================
+    st.header("📋 Tables")
+
+    # Clusters table
+    st.subheader("Clusters")
+    if trend_df is not None and not trend_df.empty:
+        st.dataframe(
+            clusters,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "trend": st.column_config.LineChartColumn(
+                    "Trend",
+                    help=f"Weekly {trend_metric.lower()} per cluster (sparkline)",
+                    y_min=0,
+                )
+            }
+        )
+    else:
+        st.dataframe(clusters, use_container_width=True, hide_index=True)
+
+    # Opportunities table
+    st.subheader("Opportunities")
+    st.dataframe(opp, use_container_width=True, hide_index=True)
+
+    # Top queries table
+    st.subheader("Top Queries (Drilldown)")
+    topq = (
+        df_vis.sort_values(["Impressions", "Clicks"], ascending=[False, False])
+              [["cluster_label", "Query", "Clicks", "Impressions", "CTR", "Position"]]
+              .head(500)
+    )
+    st.dataframe(topq, use_container_width=True, hide_index=True)
+
+    # ==========================
+    # CONTENT BRIEF
+    # ==========================
+    st.header("📄 Content Brief")
+    if clusters.empty:
+        st.info("No clusters yet. Upload a CSV or adjust filters.")
+    else:
+        # Cluster selector label
+        clusters["_label_for_ui2"] = clusters.apply(
+            lambda r: f"[{int(r['cluster_id'])}] {r['cluster_label'] or ''}".strip(),
+            axis=1
+        )
+        sel = st.selectbox("Choose a cluster for a brief", options=clusters["_label_for_ui2"].tolist())
+        chosen_id = int(sel.split("]")[0].strip("[")) if sel else None
+        chosen_row = clusters[clusters["cluster_id"] == chosen_id].head(1)
+        chosen_label = chosen_row["cluster_label"].iloc[0] if not chosen_row.empty else ""
+        # Ensure chosen_label is a valid string
+        if pd.isna(chosen_label) or not isinstance(chosen_label, str) or not chosen_label.strip():
+            st.warning(f"Invalid cluster label for ID {chosen_id}. Using fallback label.")
+            chosen_label = f"Cluster {chosen_id}"
+
+        brief_md = ""
+        if chosen_id == -1:
+            st.info("This is the **Unclustered** group. It contains mixed queries, so a single content brief isn’t useful. Adjust filters or clustering settings to reduce noise.")
+        else:
+            df_cluster = df_nb[df_nb["cluster_id"] == chosen_id].copy()
+            try:
+                brief_md = build_content_brief(
+                    df_cluster=df_cluster,
+                    cluster_id=chosen_id,
+                    cluster_label=chosen_label,
+                    centroids=None  # optional
+                )
+                st.markdown(brief_md)
+                st.download_button(
+                    "⬇️ Download brief (Markdown)",
+                    data=brief_md.encode("utf-8"),
+                    file_name=f"content-brief-cluster-{chosen_id}.md",
+                    mime="text/markdown"
+                )
+            except Exception as e:
+                st.error(f"Failed to generate content brief: {str(e)}")
+
+        # PDF Export
+        if WEASYPRINT_AVAILABLE:
+            with st.spinner("Generating PDF report..."):
+                try:
+                    avg_position_pdf = f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—"
+                    brief_html = markdown.markdown(brief_md) if brief_md else "<p>No brief selected or available.</p>"
+                    html_content = f"""
+                    <style>
+                        @page {{ size: A4 landscape; }}
+                        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                        h1 {{ color: #1f77b4; }}
+                        h2 {{ color: #333; }}
+                        table {{ border-collapse: collapse; width: 100%; font-size: 10px; }}
+                        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                        th {{ background-color: #f2f2f2; }}
+                    </style>
+                    <h1>SEO Cluster Report</h1>
+                    <h2>Summary</h2>
+                    <p><strong>Impressions:</strong> {int(total_impr):,}</p>
+                    <p><strong>Clicks:</strong> {int(df_nb['Clicks'].sum()):,}</p>
+                    <p><strong>Avg CTR:</strong> {(df_nb['CTR'].mean()*100 if df_nb['CTR'].notna().any() else 0):.2f}%</p>
+                    <p><strong>Avg Position:</strong> {avg_position_pdf}</p>
+                    <p><strong>Clusters:</strong> {(clusters['cluster_id'] != -1).sum():,}</p>
+                    <p><strong>Top10 Share (clustered):</strong> {share_top10*100:.1f}%</p>
+                    <p><strong>Unclustered Share:</strong> {(unclustered_impr/total_impr*100 if total_impr>0 else 0):.1f}%</p>
+                    <h2>Clusters</h2>
+                    {clusters.to_html(index=False)}
+                    <h2>Selected Content Brief</h2>
+                    {brief_html}
+                    """
+                    pdf_buffer = io.BytesIO()
+                    HTML(string=html_content).write_pdf(pdf_buffer)
+                    st.download_button(
+                        "⬇️ Download PDF Report",
+                        data=pdf_buffer.getvalue(),
+                        file_name="seo_cluster_report.pdf",
+                        mime="application/pdf"
+                    )
+                except Exception as e:
+                    st.error(f"Failed to generate PDF report: {str(e)}")
+        else:
+            st.info("PDF export requires the 'weasyprint' library. Install it to enable this feature.")
+
+    # Export summary
+    st.download_button(
+        "⬇️ Export clusters (CSV)",
+        data=export_csv(clusters),
+        file_name="clusters.csv",
+        mime="text/csv"
+    )
+else:
+    st.info("Upload a GSC Queries CSV to get started.")
+
+# Display re-clustering message if it exists
+if 'recluster_message' in st.session_state:
+    st.success(st.session_state['recluster_message'])
+    st.markdown(
+        """
+        <style>
+            div.stAlert div {
+                animation: fadeOut 5s forwards;
+            }
+            @keyframes fadeOut {
+                to { opacity: 0; }
+            }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
