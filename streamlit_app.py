@@ -249,7 +249,6 @@ if uploaded is not None:
     clustered_impr = max(total_impr - unclustered_impr, 0)
 
     # Debug: Log clusters shape and KPI values
-    st.write(f"Debug: chosen_label type: {type(chosen_label)}")  # Debug log for cluster_label type
     st.write(f"Debug: clusters shape: {clusters.shape}")
     st.write(f"Debug: Before re-clustering (if any): unclustered = {(df_nb['cluster_id'] == -1).sum()}")
     avg_position = f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—"
