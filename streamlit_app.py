@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from typing import List
+import markdown
 
 # Try to import weasyprint; handle if missing
 try:
@@ -215,8 +216,9 @@ if uploaded is not None:
                 total_reclustered = len(unclustered)
                 st.success(
                     f"Re-clustered {total_reclustered} queries: {new_clusters} new clusters formed, "
-                    f"{remaining_unclustered} remain unclustered. Refresh visuals below."
+                    f"{remaining_unclustered} remain unclustered."
                 )
+                st.experimental_rerun()
 
     # Intent tagging for dashboard breakdowns
     df_nb["intent"] = df_nb["Query_norm"].map(intent_bucket)
@@ -406,6 +408,7 @@ if uploaded is not None:
         st.dataframe(
             clusters,
             use_container_width=True,
+            hide_index=True,
             column_config={
                 "trend": st.column_config.LineChartColumn(
                     "Trend",
@@ -415,11 +418,11 @@ if uploaded is not None:
             }
         )
     else:
-        st.dataframe(clusters, use_container_width=True)
+        st.dataframe(clusters, use_container_width=True, hide_index=True)
 
     # Opportunities table
     st.subheader("Opportunities")
-    st.dataframe(opp, use_container_width=True)
+    st.dataframe(opp, use_container_width=True, hide_index=True)
 
     # Top queries table
     st.subheader("Top Queries (Drilldown)")
@@ -428,7 +431,7 @@ if uploaded is not None:
               [["cluster_label", "Query", "Clicks", "Impressions", "CTR", "Position"]]
               .head(500)
     )
-    st.dataframe(topq, use_container_width=True)
+    st.dataframe(topq, use_container_width=True, hide_index=True)
 
     # ==========================
     # CONTENT BRIEF
@@ -475,15 +478,16 @@ if uploaded is not None:
 
         # PDF Export
         if WEASYPRINT_AVAILABLE:
-            if st.button("⬇️ Download PDF Report"):
+            with st.spinner("Generating PDF report..."):
                 try:
                     avg_position_pdf = f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—"
+                    brief_html = markdown.markdown(brief_md) if brief_md else "<p>No brief selected or available.</p>"
                     html_content = f"""
                     <style>
                         body {{ font-family: Arial, sans-serif; margin: 20px; }}
                         h1 {{ color: #1f77b4; }}
                         h2 {{ color: #333; }}
-                        table {{ border-collapse: collapse; width: 100%; }}
+                        table {{ border-collapse: collapse; width: 100%; font-size: 10px; }}
                         th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
                         th {{ background-color: #f2f2f2; }}
                     </style>
@@ -499,10 +503,10 @@ if uploaded is not None:
                     <h2>Clusters</h2>
                     {clusters.to_html(index=False)}
                     <h2>Selected Content Brief</h2>
-                    {brief_md if brief_md else '<p>No brief selected or available.</p>'}
+                    {brief_html}
                     """
                     pdf_buffer = io.BytesIO()
-                    HTML(string=html_content).write_pdf(pdf_buffer)
+                    HTML(string=html_content, landscape=True).write_pdf(pdf_buffer)
                     st.download_button(
                         "⬇️ Download PDF Report",
                         data=pdf_buffer.getvalue(),
