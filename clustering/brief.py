@@ -94,11 +94,14 @@ def build_content_brief(
         cluster_label = f"Cluster {cluster_id}"
 
     # Key phrases using CountVectorizer and semantic filtering
-    vectorizer = CountVectorizer(ngram_range=(1, 3), stop_words="english", min_df=2)
+    vectorizer = CountVectorizer(ngram_range=(1, 3), stop_words="english", min_df=1)
     docs = [" ".join(data["Query_norm"].tolist())]
     X = vectorizer.fit_transform(docs)
-    terms = vectorizer.get_feature_names_out()
-    keyphrases = _semantic_top_phrases(data["Query_norm"].tolist(), top_k=top_phrases_k)
+    terms = vectorizer.get_feature_names_out() if X.shape[1] > 0 else []
+    if not terms:
+        keyphrases = _semantic_top_phrases(data["Query_norm"].tolist(), top_k=top_phrases_k)
+    else:
+        keyphrases = _semantic_top_phrases(terms, top_k=top_phrases_k)
 
     # Intents & buckets
     data["intent"] = data["Query_norm"].map(_intent_bucket)
