@@ -17,7 +17,14 @@ def _semantic_top_phrases(texts: List[str], top_k: int = 10) -> List[str]:
     embeddings = semantic_model.encode(texts, convert_to_numpy=True)
     norms = np.linalg.norm(embeddings, axis=1)  # Use norm as a simple relevance metric
     idx = np.argsort(norms)[::-1]  # Sort by norm (highest first)
-    return [texts[i] for i in idx[:top_k]]  # Take top_k based on norm
+    tops = [texts[i] for i in idx[:top_k*2]]
+    out = []
+    for t in tops:
+        if not any(str(t) in str(o) or str(o) in str(t) for o in out if isinstance(o, str)):
+            out.append(t)
+        if len(out) >= top_k:
+            break
+    return out
 
 def _intent_bucket(q: str) -> str:
     s = q.lower()
