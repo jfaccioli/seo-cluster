@@ -8,8 +8,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 WH_WORDS = r"^(who|what|when|where|why|how|can|does|do|is|are|should)\b"
 
-# Initialize SentenceTransformer for semantic embeddings
-semantic_model = SentenceTransformer("distilbert-base-uncased")
+# Initialize SentenceTransformer for semantic embeddings with explicit CPU device
+semantic_model = SentenceTransformer("distilbert-base-uncased", device="cpu")
 
 def _semantic_top_phrases(texts: List[str], top_k: int = 10) -> List[str]:
     if len(texts) == 0:
