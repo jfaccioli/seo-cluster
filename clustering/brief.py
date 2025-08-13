@@ -2,29 +2,26 @@ import re
 from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
-from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 WH_WORDS = r"^(who|what|when|where|why|how|can|does|do|is|are|should)\b"
 
-# Initialize SentenceTransformer for semantic embeddings with explicit CPU device
-semantic_model = SentenceTransformer("distilbert-base-uncased", device="cpu")
+# Note: SentenceTransformer commented out to avoid NotImplementedError
+# semantic_model = SentenceTransformer("distilbert-base-uncased", device="cpu")
 
 def _semantic_top_phrases(texts: List[str], top_k: int = 10) -> List[str]:
     if len(texts) == 0:
         return []
-    embeddings = semantic_model.encode(texts, convert_to_numpy=True)
-    norms = np.linalg.norm(embeddings, axis=1)  # Use norm as a simple relevance metric
-    idx = np.argsort(norms)[::-1]  # Sort by norm (highest first)
-    tops = [texts[i] for i in idx[:top_k*2]]
-    out = []
-    for t in tops:
-        if not any(str(t) in str(o) or str(o) in str(t) for o in out if isinstance(o, str)):
-            out.append(t)
-        if len(out) >= top_k:
-            break
-    return out
+    vectorizer = CountVectorizer(ngram_range=(1, 3), stop_words="english", min_df=1)
+    docs = [" ".join(texts)]
+    X = vectorizer.fit_transform(docs)
+    terms = vectorizer.get_feature_names_out()
+    if not terms.size:
+        return texts[:top_k]  # Fallback to raw texts if no terms
+    freqs = X.toarray().sum(axis=0)  # Sum frequencies across documents
+    idx = np.argsort(freqs)[::-1]  # Sort by frequency (highest first)
+    return [terms[i] for i in idx[:top_k]]  # Take top_k based on frequency
 
 def _intent_bucket(q: str) -> str:
     s = q.lower()
