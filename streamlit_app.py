@@ -24,33 +24,27 @@ from utils.export import export_csv
 
 st.set_page_config(page_title="SEO Keyword Clusters (MVP)", layout="wide")
 
-
 # --------------------------
 # Robust CSV loader for GSC
 # --------------------------
 @st.cache_data(show_spinner=False)
 def load_csv(file) -> pd.DataFrame:
     df = pd.read_csv(file)
-
     # 1) Normalize column names (case/spacing); support "Top queries"
     cols = {c.strip().lower(): c for c in df.columns}
-
     def find(*cands):
         for c in cands:
             if c in cols:
                 return cols[c]
         return None
-
     q_col = find("query", "top queries")
     clk = find("clicks")
     impr = find("impressions")
     ctr = find("ctr")
     pos = find("position")
     date = find("date")
-
     if not q_col:
         raise ValueError("CSV must include a 'Query' or 'Top queries' column from GSC export.")
-
     # 2) Rename to a stable schema
     rename = {q_col: "Query"}
     if clk: rename[clk] = "Clicks"
@@ -59,11 +53,9 @@ def load_csv(file) -> pd.DataFrame:
     if pos: rename[pos] = "Position"
     if date: rename[date] = "Date"
     df = df.rename(columns=rename)
-
     # 3) Parse Date if present
     if "Date" in df.columns:
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-
     # 4) Ensure numeric types (CTR can be '3.2%' or '0.032'; numbers can have commas)
     if "CTR" in df.columns:
         df["CTR"] = (
@@ -74,21 +66,17 @@ def load_csv(file) -> pd.DataFrame:
         )
         ctr_numeric = pd.to_numeric(df["CTR"], errors="coerce")
         df["CTR"] = np.where(ctr_numeric > 1, ctr_numeric / 100.0, ctr_numeric)
-
     for c in ["Clicks", "Impressions", "Position"]:
         if c in df.columns:
             df[c] = pd.to_numeric(
                 df[c].astype(str).str.replace(",", "", regex=False),
                 errors="coerce"
             )
-
     # 5) Fill safe defaults if any columns are missing
     for c, default in [("Clicks", 0), ("Impressions", 0), ("CTR", 0.0), ("Position", np.nan)]:
         if c not in df.columns:
             df[c] = default
-
     return df
-
 
 # --------------------------
 # Helpers
@@ -108,7 +96,6 @@ def intent_bucket(q: str) -> str:
 
 def kpi_card(label: str, value: str):
     st.metric(label=label, value=value)
-
 
 # --------------------------
 # UI
@@ -210,6 +197,7 @@ if uploaded is not None:
                 )
                 # Update original df_nb with re-clustered rows
                 df_nb.update(unclustered)
+                st.session_state['df_nb'] = df_nb  # Persist data
                 # Count re-clustered vs remaining
                 new_clusters = unclustered[unclustered["cluster_id"] != -1]["cluster_id"].nunique()
                 remaining_unclustered = len(unclustered[unclustered["cluster_id"] == -1])
@@ -526,6 +514,5 @@ if uploaded is not None:
         file_name="clusters.csv",
         mime="text/csv"
     )
-
 else:
     st.info("Upload a GSC Queries CSV to get started.")
