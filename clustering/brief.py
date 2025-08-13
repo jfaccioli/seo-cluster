@@ -13,15 +13,20 @@ WH_WORDS = r"^(who|what|when|where|why|how|can|does|do|is|are|should)\b"
 def _semantic_top_phrases(texts: List[str], top_k: int = 10) -> List[str]:
     if len(texts) == 0:
         return []
-    vectorizer = CountVectorizer(ngram_range=(1, 3), stop_words="english", min_df=1)
-    docs = [" ".join(texts)]
-    X = vectorizer.fit_transform(docs)
-    terms = vectorizer.get_feature_names_out()
-    if not terms.size:
-        return texts[:top_k]  # Fallback to raw texts if no terms
-    freqs = X.toarray().sum(axis=0)  # Sum frequencies across documents
-    idx = np.argsort(freqs)[::-1]  # Sort by frequency (highest first)
-    return [terms[i] for i in idx[:top_k]]  # Take top_k based on frequency
+    try:
+        vectorizer = CountVectorizer(ngram_range=(1, 3), stop_words="english", min_df=1)
+        docs = [" ".join(texts)]
+        X = vectorizer.fit_transform(docs)
+        terms = vectorizer.get_feature_names_out()
+        # Fix: Check if terms array is empty using len() instead of .size
+        if len(terms) == 0:
+            return texts[:top_k]  # Fallback to raw texts if no terms
+        freqs = X.toarray().sum(axis=0)  # Sum frequencies across documents
+        idx = np.argsort(freqs)[::-1]  # Sort by frequency (highest first)
+        return [terms[i] for i in idx[:top_k]]  # Take top_k based on frequency
+    except Exception as e:
+        # Fallback to returning first few texts if vectorization fails
+        return texts[:top_k]
 
 def _intent_bucket(q: str) -> str:
     s = q.lower()
@@ -84,7 +89,6 @@ def build_content_brief(
     data = df_cluster.copy()
     if data.empty:
         return "# Content Brief\n\n_No data in this cluster._"
-
     # Fix: Ensure cluster_label is a valid string - handle Series/array case
     if isinstance(cluster_label, (pd.Series, np.ndarray)):
         # If it's a Series or array, get the first value
@@ -92,57 +96,67 @@ def build_content_brief(
     elif not isinstance(cluster_label, str):
         # If it's not a string, convert it
         cluster_label = str(cluster_label)
-
     # Now safely check if it's empty after ensuring it's a string
     if not cluster_label or not cluster_label.strip():
         cluster_label = f"Cluster {cluster_id}"
-
     try:
         # Key phrases using CountVectorizer and semantic filtering
-        vectorizer = CountVectorizer(ngram_range=(1, 3), stop_words="english", min_df=1)
-        docs = [" ".join(data["Query_norm"].tolist())]
-        X = vectorizer.fit_transform(docs)
-        terms = vectorizer.get_feature_names_out() if X.shape[1] > 0 else []
-        keyphrases = _semantic_top_phrases(terms if terms else data["Query_norm"].tolist(), top_k=top_phrases_k)
-
+        query_texts = data["Query_norm"].tolist()
+        keyphrases = _semantic_top_phrases(query_texts, top_k=top_phrases_k)
         # Intents & buckets
         data["intent"] = data["Query_norm"].map(_intent_bucket)
         buckets = data.groupby("intent")["Query"].apply(lambda s: list(s)[:5]).to_dict()
-
         # FAQs (top by impressions)
         faq_df = data[data["intent"] == "FAQ"].copy()
-        faq_df = faq_df.sort_values("Impressions", ascending=False).head(6)
-        faqs = faq_df["Query"].tolist()
-
+        if not faq_df.empty:
+            faq_df = faq_df.sort_values("Impressions", ascending=False).head(6)
+            faqs = faq_df["Query"].tolist()
+        else:
+            faqs = []
         # Generate titles/H1 ideas using templates
         title_opts = [
-            f"{cluster_label} Guide: {keyphrases[0]} in WA" if keyphrases else f"{cluster_label} Guide",
-            f"{cluster_label} - Services and Costs in Perth" if keyphrases else f"{cluster_label} Overview",
-            f"Top {keyphrases[0]} Options in Australia" if keyphrases else f"Top {cluster_label} Tips",
-            f"How to Choose {keyphrases[0]} in 2025" if keyphrases else f"How to Choose {cluster_label}"
+            f"{cluster_label} Guide: {keyphrases[0]} in WA" if keyphrases and keyphrases[0] else f"{cluster_label} Guide",
+            f"{cluster_label} - Services and Costs in Perth" if keyphrases and keyphrases[0] else f"{cluster_label} Overview",
+            f"Top {keyphrases[0]} Options in Australia" if keyphrases and keyphrases[0] else f"Top {cluster_label} Tips",
+            f"How to Choose {keyphrases[0]} in 2025" if keyphrases and keyphrases[0] else f"How to Choose {cluster_label}"
         ][:4]  # Limit to 4
-
-        # Generate H2 sections using intents and keyphrases
-        h2_suggestions = [
-            f"{buckets.get('FAQ', ['FAQ'])[0]}: Common Questions" if 'FAQ' in buckets else "FAQs",
-            f"{buckets.get('Informational', ['Info'])[0]} Insights" if 'Informational' in buckets else "Key Insights",
-            f"Local {keyphrases[0]} Options" if keyphrases and 'Local / Navigational' in buckets else "Local Guide",
-            f"{keyphrases[0]} Services Near You" if keyphrases and 'Transactional / Service' in buckets else "Services",
-            f"Benefits of {keyphrases[0]}" if keyphrases else "Benefits Overview",
-            f"Costs of {keyphrases[0]} in 2025" if keyphrases else "Cost Guide"
-        ][:6]  # Limit to 6
-
+        # Generate H2 sections using intents and keyphrases - with safety checks
+        h2_suggestions = []
+        if 'FAQ' in buckets and buckets['FAQ']:
+            h2_suggestions.append(f"{buckets['FAQ'][0]}: Common Questions")
+        else:
+            h2_suggestions.append("FAQs")
+        if 'Informational' in buckets and buckets['Informational']:
+            h2_suggestions.append(f"{buckets['Informational'][0]} Insights")
+        else:
+            h2_suggestions.append("Key Insights")
+        if keyphrases and 'Local / Navigational' in buckets and buckets['Local / Navigational']:
+            h2_suggestions.append(f"Local {keyphrases[0]} Options")
+        else:
+            h2_suggestions.append("Local Guide")
+        if keyphrases and 'Transactional / Service' in buckets and buckets['Transactional / Service']:
+            h2_suggestions.append(f"{keyphrases[0]} Services Near You")
+        else:
+            h2_suggestions.append("Services")
+        if keyphrases and keyphrases[0]:
+            h2_suggestions.extend([
+                f"Benefits of {keyphrases[0]}",
+                f"Costs of {keyphrases[0]} in 2025"
+            ])
+        else:
+            h2_suggestions.extend([
+                "Benefits Overview",
+                "Cost Guide"
+            ])
+        h2_suggestions = h2_suggestions[:6]  # Limit to 6
         # Related topics (semantic expansion)
-        related_topics = [p for p in keyphrases[3:8] if p not in h2_suggestions]
-
+        related_topics = [p for p in keyphrases[3:8] if p not in h2_suggestions] if keyphrases else []
         # Page type & word count
         page_type, min_words, max_words = _suggest_page_type(data["intent"], len(data))
-
         # Internal links
         link_ids = []
         if centroids:
             link_ids = nearest_clusters(centroids, cluster_id, top_n=5)
-
         # Build Markdown
         md = []
         md.append(f"# Content Brief: {cluster_label}")
