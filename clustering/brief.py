@@ -16,12 +16,12 @@ def _semantic_top_phrases(texts: List[str], top_k: int = 10) -> List[str]:
         return []
     embeddings = semantic_model.encode(texts, convert_to_numpy=True)
     centroid = np.mean(embeddings, axis=0, keepdims=True)
-    similarities = cosine_similarity(embeddings, centroid).flatten()
+    similarities = list(cosine_similarity(embeddings, centroid).flatten())  # Convert to list of scalars
     idx = np.argsort(similarities)[::-1]
     tops = [texts[i] for i in idx[:top_k*2]]
     out = []
     for t in tops:
-        if not any(t in o or o in t for o in out):
+        if not any(t in o or o in t for o in out if isinstance(o, str)):
             out.append(t)
         if len(out) >= top_k:
             break
@@ -175,4 +175,4 @@ def build_content_brief(
         md.append(_format_md_list(data["Query"].head(10).tolist()))
         return "\n".join(md)
     except Exception as e:
-        return f"# Content Brief: {cluster_label}\n\n**Error**: Failed to generate brief due to {str(e)}. Please ensure the cluster has valid data."
+        return f"# Content Brief: {cluster_label}\n\n**Error**: Failed to generate brief due to {str(e)} for cluster with {len(data)} queries. Please ensure the cluster has valid data."
