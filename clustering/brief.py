@@ -1,92 +1,37 @@
 import re
-import streamlit as st
-import pandas as pd
+from typing import Dict, List, Tuple
 import numpy as np
-from typing import List
-import markdown
+import pandas as pd
+from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
-# Try to import weasyprint; handle if missing
-try:
-    from weasyprint import HTML
-    import io
-    WEASYPRINT_AVAILABLE = True
-except ImportError:
-    WEASYPRINT_AVAILABLE = False
+WH_WORDS = r"^(who|what|when|where|why|how|can|does|do|is|are|should)\b"
 
-# Local modules
-from clustering.preprocess import normalize_text
-from clustering.embed import embed_queries
-from clustering.cluster import cluster_embeddings
-from clustering.label import label_clusters
-from clustering.insights import score_opportunities, cluster_time_series
-from clustering.brief import build_content_brief
-from utils.export import export_csv
+# Initialize SentenceTransformer for semantic embeddings
+semantic_model = SentenceTransformer("distilbert-base-uncased")
 
-st.set_page_config(page_title="SEO Keyword Clusters (MVP)", layout="wide")
+def _semantic_top_phrases(texts: List[str], top_k: int = 10) -> List[str]:
+    if not texts:
+        return []
+    embeddings = semantic_model.encode(texts, convert_to_numpy=True)
+    centroid = np.mean(embeddings, axis=0, keepdims=True)
+    similarities = cosine_similarity(embeddings, centroid).flatten()
+    idx = np.argsort(similarities)[::-1]
+    tops = [texts[i] for i in idx[:top_k*2]]
+    out = []
+    for t in tops:
+        if not any(t in o or o in t for o in out):
+            out.append(t)
+        if len(out) >= top_k:
+            break
+    return out
 
-# --------------------------
-# Robust CSV loader for GSC
-# --------------------------
-@st.cache_data(show_spinner=False)
-def load_csv(file) -> pd.DataFrame:
-    df = pd.read_csv(file)
-    # 1) Normalize column names (case/spacing); support "Top queries"
-    cols = {c.strip().lower(): c for c in df.columns}
-    def find(*cands):
-        for c in cands:
-            if c in cols:
-                return cols[c]
-        return None
-    q_col = find("query", "top queries")
-    clk = find("clicks")
-    impr = find("impressions")
-    ctr = find("ctr")
-    pos = find("position")
-    date = find("date")
-    if not q_col:
-        raise ValueError("CSV must include a 'Query' or 'Top queries' column from GSC export.")
-    # 2) Rename to a stable schema
-    rename = {q_col: "Query"}
-    if clk: rename[clk] = "Clicks"
-    if impr: rename[impr] = "Impressions"
-    if ctr: rename[ctr] = "CTR"
-    if pos: rename[pos] = "Position"
-    if date: rename[date] = "Date"
-    df = df.rename(columns=rename)
-    # 3) Parse Date if present
-    if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    # 4) Ensure numeric types (CTR can be '3.2%' or '0.032'; numbers can have commas)
-    if "CTR" in df.columns:
-        df["CTR"] = (
-            df["CTR"]
-            .astype(str)
-            .str.replace("%", "", regex=False)
-            .str.replace(",", "", regex=False)
-        )
-        ctr_numeric = pd.to_numeric(df["CTR"], errors="coerce")
-        df["CTR"] = np.where(ctr_numeric > 1, ctr_numeric / 100.0, ctr_numeric)
-    for c in ["Clicks", "Impressions", "Position"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(
-                df[c].astype(str).str.replace(",", "", regex=False),
-                errors="coerce"
-            )
-    # 5) Fill safe defaults if any columns are missing
-    for c, default in [("Clicks", 0), ("Impressions", 0), ("CTR", 0.0), ("Position", np.nan)]:
-        if c not in df.columns:
-            df[c] = default
-    return df
-
-# --------------------------
-# Helpers
-# --------------------------
-INTENT_RE = re.compile(r"^(who|what|when|where|why|how|can|does|do|is|are|should)\b", re.I)
-def intent_bucket(q: str) -> str:
-    s = (q or "").lower()
-    if INTENT_RE.search(s) or s.endswith("?"):
+def _intent_bucket(q: str) -> str:
+    s = q.lower()
+    if re.search(WH_WORDS, s) or s.endswith("?"):
         return "FAQ"
-    if "near me" in s or any(x in s for x in ["perth", "wa", "closest", "local"]):
+    if any(x in s for x in ["near me", "perth", "wa", "closest", "local"]):
         return "Local / Navigational"
     if any(x in s for x in ["price", "cost", "quote", "book", "apply", "eligibility", "provider", "service"]):
         return "Transactional / Service"
@@ -94,444 +39,137 @@ def intent_bucket(q: str) -> str:
         return "Comparative"
     return "Informational"
 
-def kpi_card(label: str, value: str):
-    st.metric(label=label, value=value)
+def _suggest_page_type(intents: pd.Series, cluster_size: int) -> Tuple[str, int, int]:
+    counts = intents.value_counts()
+    faq_ratio = counts.get("FAQ", 0) / max(cluster_size, 1)
+    trans_ratio = counts.get("Transactional / Service", 0) / max(cluster_size, 1)
+    info_ratio = counts.get("Informational", 0) / max(cluster_size, 1)
 
-# --------------------------
-# UI
-# --------------------------
-st.title("🔎 SEO Keyword Clusters — Interactive MVP")
-st.caption("Upload a Google Search Console **Queries** CSV. Everything runs in-session; no data stored.")
+    if trans_ratio >= 0.35:
+        return ("Service / Landing Page", 700, 1200)
+    if faq_ratio >= 0.35:
+        return ("FAQ / Help Guide", 800, 1500)
+    if cluster_size > 20 and info_ratio >= 0.5:
+        return ("Pillar / In-depth Guide", 1200, 2000)
+    return ("Article / Guide", 900, 1500)
 
-with st.sidebar:
-    st.header("Settings")
-    min_impr = st.number_input("Min Impressions", min_value=0, value=50, step=10)
-    min_cluster_size = st.number_input("Min Cluster Size (HDBSCAN)", min_value=5, value=8, step=1)
-    brand_terms = st.text_input("Brand terms (comma-separated, optional)", value="")
-    do_norm = st.checkbox("Normalize queries (lowercase & trim)", value=True)
-    trend_metric = st.selectbox("Trend metric", options=["Impressions", "Clicks"], index=0)
-    st.markdown("---")
-    st.caption("Tip: raise Min Impressions for big CSVs (>20k rows).")
-    st.caption("Use 'Re-cluster Unclustered' button if unclustered share is high (>50%) to find finer groups. Large unclustered is common for noisy GSC data; try lowering Min Cluster Size (e.g., to 5) or excluding brand terms.")
-    if WEASYPRINT_AVAILABLE:
-        st.caption("Download PDF reports for professional summaries under Content Brief.")
+def _format_md_list(items: List[str]) -> str:
+    return "\n".join(f"- {x}" for x in items)
+
+def nearest_clusters(
+    centroids: Dict[int, np.ndarray],
+    target_id: int,
+    top_n: int = 5
+) -> List[int]:
+    if target_id not in centroids:
+        return []
+    keys = [k for k in centroids.keys() if k != target_id and k != -1]
+    if not keys:
+        return []
+    A = centroids[target_id]
+    sims = []
+    for k in keys:
+        B = centroids[k]
+        if A is None or B is None:
+            continue
+        denom = (np.linalg.norm(A) * np.linalg.norm(B)) or 1.0
+        sims.append((k, float(np.dot(A, B)/denom)))
+    sims.sort(key=lambda x: x[1], reverse=True)
+    return [k for k, _ in sims[:top_n]]
+
+def build_content_brief(
+    df_cluster: pd.DataFrame,
+    cluster_id: int,
+    cluster_label: str,
+    centroids: Dict[int, np.ndarray] | None = None,
+    top_phrases_k: int = 10
+) -> str:
+    """Returns a Markdown brief using ML-based generation."""
+    data = df_cluster.copy()
+    if data.empty:
+        return "# Content Brief\n\n_No data in this cluster._"
+
+    # Ensure cluster_label is a valid string
+    if not isinstance(cluster_label, str) or not cluster_label.strip():
+        cluster_label = f"Cluster {cluster_id}"
+
+    # Key phrases using CountVectorizer and semantic filtering
+    vectorizer = CountVectorizer(ngram_range=(1, 3), stop_words="english", min_df=1)
+    docs = [" ".join(data["Query_norm"].tolist())]
+    X = vectorizer.fit_transform(docs)
+    terms = vectorizer.get_feature_names_out() if X.shape[1] > 0 else []
+    if not terms:
+        keyphrases = _semantic_top_phrases(data["Query_norm"].tolist(), top_k=top_phrases_k)
     else:
-        st.caption("PDF export unavailable (requires weasyprint library).")
+        keyphrases = _semantic_top_phrases(terms, top_k=top_phrases_k)
 
-uploaded = st.file_uploader("Upload GSC Queries CSV", type=["csv"])
+    # Intents & buckets
+    data["intent"] = data["Query_norm"].map(_intent_bucket)
+    buckets = data.groupby("intent")["Query"].apply(lambda s: list(s)[:5]).to_dict()
 
-if uploaded is not None:
-    # -------- Load & prep
-    try:
-        raw = load_csv(uploaded)
-    except Exception as e:
-        st.error(f"Failed to read CSV: {e}")
-        st.stop()
+    # FAQs (top by impressions)
+    faq_df = data[data["intent"] == "FAQ"].copy()
+    faq_df = faq_df.sort_values("Impressions", ascending=False).head(6)
+    faqs = faq_df["Query"].tolist()
 
-    df = raw.copy()
-    df = df[df["Impressions"].fillna(0) >= min_impr].reset_index(drop=True)
-    df["Query_norm"] = df["Query"].astype(str).map(normalize_text) if do_norm else df["Query"].astype(str)
+    # Generate titles/H1 ideas using templates
+    title_opts = [
+        f"{cluster_label} Guide: {keyphrases[0]} in WA" if keyphrases else f"{cluster_label} Guide",
+        f"{cluster_label} - Services and Costs in Perth" if keyphrases else f"{cluster_label} Overview",
+        f"Top {keyphrases[0]} Options in Australia" if keyphrases else f"Top {cluster_label} Tips",
+        f"How to Choose {keyphrases[0]} in 2025" if keyphrases else f"How to Choose {cluster_label}"
+    ][:4]  # Limit to 4
 
-    # Brand exclusions
-    if brand_terms.strip():
-        brands = [b.strip().lower() for b in brand_terms.split(",") if b.strip()]
-        pattern = "|".join([re.escape(b) for b in brands])
-        mask = ~df["Query_norm"].str.lower().str.contains(pattern, regex=True)
-        df_nb = df[mask].copy()
-    else:
-        df_nb = df.copy()
+    # Generate H2 sections using intents and keyphrases
+    h2_suggestions = [
+        f"{buckets.get('FAQ', ['FAQ'])[0]}: Common Questions" if 'FAQ' in buckets else "FAQs",
+        f"{buckets.get('Informational', ['Info'])[0]} Insights" if 'Informational' in buckets else "Key Insights",
+        f"Local {keyphrases[0]} Options" if keyphrases and 'Local / Navigational' in buckets else "Local Guide",
+        f"{keyphrases[0]} Services Near You" if keyphrases and 'Transactional / Service' in buckets else "Services",
+        f"Benefits of {keyphrases[0]}" if keyphrases else "Benefits Overview",
+        f"Costs of {keyphrases[0]} in 2025" if keyphrases else "Cost Guide"
+    ][:6]  # Limit to 6
 
-    # Important: reindex after brand filter so embeddings align with row positions
-    df_nb = df_nb.reset_index(drop=True)
+    # Related topics (semantic expansion)
+    related_topics = [p for p in keyphrases[3:8] if p not in h2_suggestions]
 
-    # -------- Embed & cluster
-    with st.spinner("Embedding queries…"):
-        embeddings = embed_queries(df_nb["Query_norm"].tolist())
+    # Page type & word count
+    page_type, min_words, max_words = _suggest_page_type(data["intent"], len(data))
 
-    with st.spinner("Clustering with HDBSCAN…"):
-        cl_labels, probabilities = cluster_embeddings(embeddings, min_cluster_size=int(min_cluster_size))
-    df_nb["cluster_id"] = cl_labels
-    df_nb["cluster_prob"] = probabilities
+    # Internal links
+    link_ids = []
+    if centroids:
+        link_ids = nearest_clusters(centroids, cluster_id, top_n=5)
 
-    # -------- Label clusters (impressions-weighted, smarter stopwords)
-    with st.spinner("Naming clusters…"):
-        labels_df = label_clusters(
-            df_nb,
-            text_col="Query_norm",
-            cluster_col="cluster_id",
-            weight_col="Impressions"
-        )
-    df_nb = df_nb.merge(labels_df, on="cluster_id", how="left")
-
-    # Mark unclustered nicely
-    df_nb["cluster_label"] = np.where(
-        df_nb["cluster_id"] == -1,
-        "Unclustered (miscellaneous)",
-        df_nb["cluster_label"].fillna("")
-    )
-
-    # Re-cluster unclustered button
-    if st.button("Re-cluster Unclustered Queries (with smaller min size)"):
-        unclustered = df_nb[df_nb["cluster_id"] == -1].copy()
-        if not unclustered.empty:
-            with st.spinner("Re-clustering unclustered queries…"):
-                embeddings_uncl = embed_queries(unclustered["Query_norm"].tolist())
-                cl_labels_uncl, probs_uncl = cluster_embeddings(embeddings_uncl, min_cluster_size=3)
-                unclustered["cluster_id"] = cl_labels_uncl
-                unclustered["cluster_prob"] = probs_uncl
-                labels_uncl = label_clusters(
-                    unclustered,
-                    text_col="Query_norm",
-                    cluster_col="cluster_id",
-                    weight_col="Impressions"
-                )
-                unclustered = unclustered.merge(labels_uncl, on="cluster_id", how="left")
-                # Ensure cluster_label exists and handle NaNs
-                if "cluster_label" not in unclustered.columns:
-                    unclustered["cluster_label"] = ""
-                unclustered["cluster_label"] = unclustered["cluster_label"].fillna("")
-                unclustered["cluster_label"] = np.where(
-                    unclustered["cluster_id"] == -1,
-                    "Remaining Unclustered",
-                    unclustered["cluster_label"]
-                )
-                # Update original df_nb with re-clustered rows
-                df_nb.update(unclustered)
-                st.session_state['df_nb'] = df_nb  # Persist data
-                # Count re-clustered vs remaining
-                initial_unclustered = (df_nb['cluster_id'] == -1).sum()
-                new_clusters = unclustered[unclustered["cluster_id"] != -1]["cluster_id"].nunique()
-                remaining_unclustered = len(unclustered[unclustered["cluster_id"] == -1])
-                total_reclustered = len(unclustered)
-                st.session_state['recluster_message'] = (
-                    f"Re-clustered {total_reclustered} queries: {new_clusters} new clusters formed, "
-                    f"Unclustered reduced from {initial_unclustered} to {initial_unclustered - total_reclustered + remaining_unclustered}."
-                )
-                st.rerun()
-
-    # Intent tagging for dashboard breakdowns
-    df_nb["intent"] = df_nb["Query_norm"].map(intent_bucket)
-
-    # -------- Aggregate summary
-    clusters = (
-        df_nb.groupby(["cluster_id", "cluster_label"], dropna=False)
-        .agg(
-            queries=("Query", "count"),
-            clicks=("Clicks", "sum"),
-            impressions=("Impressions", "sum"),
-            ctr=("CTR", "mean"),
-            position=("Position", "mean"),
-        )
-        .reset_index()
-        .sort_values(["impressions", "clicks"], ascending=[False, False])
-    )
-
-    # -------- Trend sparkline (if Date available)
-    trend_df = cluster_time_series(df_nb, metric=trend_metric)
-    show_trend = trend_df is not None and not trend_df.empty
-    if show_trend:
-        clusters = clusters.merge(
-            trend_df[["cluster_id", "cluster_label", "trend"]],
-            on=["cluster_id", "cluster_label"], how="left"
-        )
-
-    # -------- Opportunities
-    opp = score_opportunities(clusters)  # columns: cluster_id, queries, clicks, impressions, ctr, position, score
-
-    # ==========================
-    # DASHBOARD
-    # ==========================
-    st.header("📊 Dashboard")
-
-    # KPI row
-    total_impr = float(df_nb["Impressions"].sum() or 0)
-    unclustered_impr = float(df_nb.loc[df_nb["cluster_id"] == -1, "Impressions"].sum() or 0)
-    clustered_impr = max(total_impr - unclustered_impr, 0)
-
-    # Debug: Log clusters shape and KPI values
-    st.write(f"Debug: clusters shape: {clusters.shape}")
-    st.write(f"Debug: Before re-clustering (if any): unclustered = {(df_nb['cluster_id'] == -1).sum()}")
-    avg_position = f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—"
-    st.write(f"Debug: KPI values - Impressions: {int(total_impr):,}, Clicks: {int(df_nb['Clicks'].sum()):,}, "
-             f"Avg CTR: {(df_nb['CTR'].mean()*100 if df_nb['CTR'].notna().any() else 0):.2f}%, "
-             f"Avg Position: {avg_position}, "
-             f"Num Clusters: {(clusters['cluster_id'] != -1).sum():,}")
-
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    with col1:
-        kpi_card("Impressions", f"{int(total_impr):,}")
-    with col2:
-        kpi_card("Clicks", f"{int(df_nb['Clicks'].sum()):,}")
-    with col3:
-        kpi_card("Avg CTR", f"{(df_nb['CTR'].mean()*100 if df_nb['CTR'].notna().any() else 0):.2f}%")
-    with col4:
-        kpi_card("Avg Position", f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—")
-    with col5:
-        kpi_card("Num Clusters", f"{(clusters['cluster_id'] != -1).sum():,}")
-    with col6:
-        clustered_only = clusters[clusters["cluster_id"] != -1]
-        top10_impr = float(clustered_only.head(10)["impressions"].sum() or 0)
-        share_top10 = (top10_impr / clustered_impr) if clustered_impr > 0 else 0.0
-        kpi_card("Top10 Share (clustered)", f"{share_top10*100:.1f}%")
-
-    # Show Unclustered share
-    st.caption(f"Unclustered share: {(unclustered_impr/total_impr*100 if total_impr>0 else 0):.1f}%")
-
-    # Filters on dashboard (cluster multi-select)
-    clusters["_label_for_ui"] = clusters.apply(
-        lambda r: f"[{int(r['cluster_id'])}] {r['cluster_label'] or ''}".strip(),
-        axis=1
-    )
-    sel_clusters = st.multiselect(
-        "Filter clusters (optional)",
-        options=clusters["_label_for_ui"].tolist(),
-        default=clusters["_label_for_ui"].head(10).tolist()
-    )
-    def parse_id(x: str) -> int:
-        try: return int(x.split("]")[0].strip("["))
-        except: return -9999
-    selected_ids = {parse_id(x) for x in sel_clusters} if sel_clusters else None
-
-    # Subset for visuals
-    clusters_v = clusters.copy()
-    df_vis = df_nb.copy()
-    if selected_ids:
-        clusters_v = clusters_v[clusters_v["cluster_id"].isin(selected_ids)]
-        df_vis = df_vis[df_vis["cluster_id"].isin(selected_ids)]
-
-    import plotly.express as px
-
-    # Viz 1: Treemap (size=Impressions, color=CTR)
-    st.subheader("Treemap — Cluster scale & CTR")
-    if not clusters_v.empty:
-        fig_tm = px.treemap(
-            clusters_v,
-            path=["cluster_label"],
-            values="impressions",
-            color="ctr",
-            color_continuous_scale="Blues",
-            hover_data={"queries": True, "clicks": True, "position": True, "ctr": True}
-        )
-        fig_tm.update_layout(margin=dict(t=30,l=0,r=0,b=0))
-        st.plotly_chart(fig_tm, use_container_width=True)
-    else:
-        st.info("No clusters to show. Try adjusting filters.")
-
-    # Viz 2: Opportunity bubble (x=position, y=impressions, size=clicks, color=score)
-    st.subheader("Opportunity Map — Where to act next")
-    if not clusters_v.empty:
-        # No need to merge—opp already has cluster_label from clusters
-        opp_v = opp.copy()
-
-        if selected_ids:
-            opp_v = opp_v[opp_v["cluster_id"].isin(selected_ids)]
-
-        # Ensure numeric types and handle missing/invalid values
-        required_cols = ["position", "impressions", "clicks", "score"]
-        for c in required_cols:
-            if c in opp_v.columns:
-                opp_v[c] = pd.to_numeric(opp_v[c], errors="coerce")
-            else:
-                st.error(f"Missing required column: {c}")
-                st.stop()
-
-        # Replace infinities and drop rows with NaN in required columns (add cluster_label to ensure hover_name works)
-        opp_v = opp_v.replace([np.inf, -np.inf], np.nan)
-        opp_v = opp_v.dropna(subset=required_cols + ["cluster_label"])
-
-        if opp_v.empty:
-            st.info("No data for the Opportunity Map with current filters.")
-        else:
-            fig_bub = px.scatter(
-                opp_v,
-                x="position",
-                y="impressions",
-                size="clicks",
-                color="score",
-                hover_name="cluster_label",
-                size_max=60,
-                labels={"position": "Avg Position (lower is better)", "impressions": "Impressions"}
-            )
-            fig_bub.update_layout(margin=dict(t=30, l=0, r=0, b=0), xaxis_autorange="reversed")
-            st.plotly_chart(fig_bub, use_container_width=True)
-    else:
-        st.info("No opportunities to display.")
-
-    # Viz 3: Trend line (if Date available)
-    if "Date" in df_vis.columns and df_vis["Date"].notna().any():
-        st.subheader(f"Trend — {trend_metric} by cluster")
-        ts = (
-            df_vis.dropna(subset=["Date"])
-                 .groupby([pd.Grouper(key="Date", freq="W-MON"), "cluster_label"], dropna=False)
-                 .agg(val=(trend_metric, "sum"))
-                 .reset_index()
-        )
-        if not ts.empty:
-            fig_line = px.line(ts, x="Date", y="val", color="cluster_label",
-                               labels={"val": trend_metric})
-            fig_line.update_layout(margin=dict(t=30,l=0,r=0,b=0))
-            st.plotly_chart(fig_line, use_container_width=True)
-        else:
-            st.info("No dated data to plot trends.")
-    else:
-        st.info("No **Date** column found in CSV, so trend charts are hidden. Export a Date+Query GSC report to enable.")
-
-    # Viz 4: Intent breakdown
-    st.subheader("Intent breakdown")
-    if not df_vis.empty:
-        intent_pivot = (
-            df_vis.groupby(["cluster_label","intent"])
-                  .size().reset_index(name="count")
-        )
-        fig_intent = px.bar(intent_pivot, x="cluster_label", y="count", color="intent", barmode="stack")
-        fig_intent.update_layout(margin=dict(t=30,l=0,r=0,b=0), xaxis={'visible': False, 'showticklabels': False})
-        st.plotly_chart(fig_intent, use_container_width=True)
-
-    # ==========================
-    # TABLES
-    # ==========================
-    st.header("📋 Tables")
-
-    # Clusters table
-    st.subheader("Clusters")
-    if trend_df is not None and not trend_df.empty:
-        st.dataframe(
-            clusters,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "trend": st.column_config.LineChartColumn(
-                    "Trend",
-                    help=f"Weekly {trend_metric.lower()} per cluster (sparkline)",
-                    y_min=0,
-                )
-            }
-        )
-    else:
-        st.dataframe(clusters, use_container_width=True, hide_index=True)
-
-    # Opportunities table
-    st.subheader("Opportunities")
-    st.dataframe(opp, use_container_width=True, hide_index=True)
-
-    # Top queries table
-    st.subheader("Top Queries (Drilldown)")
-    topq = (
-        df_vis.sort_values(["Impressions", "Clicks"], ascending=[False, False])
-              [["cluster_label", "Query", "Clicks", "Impressions", "CTR", "Position"]]
-              .head(500)
-    )
-    st.dataframe(topq, use_container_width=True, hide_index=True)
-
-    # ==========================
-    # CONTENT BRIEF
-    # ==========================
-    st.header("📄 Content Brief")
-    if clusters.empty:
-        st.info("No clusters yet. Upload a CSV or adjust filters.")
-    else:
-        # Cluster selector label
-        clusters["_label_for_ui2"] = clusters.apply(
-            lambda r: f"[{int(r['cluster_id'])}] {r['cluster_label'] or ''}".strip(),
-            axis=1
-        )
-        sel = st.selectbox("Choose a cluster for a brief", options=clusters["_label_for_ui2"].tolist())
-        chosen_id = int(sel.split("]")[0].strip("[")) if sel else None
-        chosen_row = clusters[clusters["cluster_id"] == chosen_id].head(1)
-        chosen_label = chosen_row["cluster_label"].iloc[0] if not chosen_row.empty else ""
-        # Ensure chosen_label is a valid string
-        if pd.isna(chosen_label) or not isinstance(chosen_label, str) or not chosen_label.strip():
-            st.warning(f"Invalid cluster label for ID {chosen_id}. Using fallback label.")
-            chosen_label = f"Cluster {chosen_id}"
-
-        brief_md = ""
-        if chosen_id == -1:
-            st.info("This is the **Unclustered** group. It contains mixed queries, so a single content brief isn’t useful. Adjust filters or clustering settings to reduce noise.")
-        else:
-            df_cluster = df_nb[df_nb["cluster_id"] == chosen_id].copy()
-            try:
-                brief_md = build_content_brief(
-                    df_cluster=df_cluster,
-                    cluster_id=chosen_id,
-                    cluster_label=chosen_label,
-                    centroids=None  # optional
-                )
-                st.markdown(brief_md)
-                st.download_button(
-                    "⬇️ Download brief (Markdown)",
-                    data=brief_md.encode("utf-8"),
-                    file_name=f"content-brief-cluster-{chosen_id}.md",
-                    mime="text/markdown"
-                )
-            except Exception as e:
-                st.error(f"Failed to generate content brief: {str(e)}")
-
-        # PDF Export
-        if WEASYPRINT_AVAILABLE:
-            with st.spinner("Generating PDF report..."):
-                try:
-                    avg_position_pdf = f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—"
-                    brief_html = markdown.markdown(brief_md) if brief_md else "<p>No brief selected or available.</p>"
-                    html_content = f"""
-                    <style>
-                        @page {{ size: A4 landscape; }}
-                        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-                        h1 {{ color: #1f77b4; }}
-                        h2 {{ color: #333; }}
-                        table {{ border-collapse: collapse; width: 100%; font-size: 10px; }}
-                        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-                        th {{ background-color: #f2f2f2; }}
-                    </style>
-                    <h1>SEO Cluster Report</h1>
-                    <h2>Summary</h2>
-                    <p><strong>Impressions:</strong> {int(total_impr):,}</p>
-                    <p><strong>Clicks:</strong> {int(df_nb['Clicks'].sum()):,}</p>
-                    <p><strong>Avg CTR:</strong> {(df_nb['CTR'].mean()*100 if df_nb['CTR'].notna().any() else 0):.2f}%</p>
-                    <p><strong>Avg Position:</strong> {avg_position_pdf}</p>
-                    <p><strong>Clusters:</strong> {(clusters['cluster_id'] != -1).sum():,}</p>
-                    <p><strong>Top10 Share (clustered):</strong> {share_top10*100:.1f}%</p>
-                    <p><strong>Unclustered Share:</strong> {(unclustered_impr/total_impr*100 if total_impr>0 else 0):.1f}%</p>
-                    <h2>Clusters</h2>
-                    {clusters.to_html(index=False)}
-                    <h2>Selected Content Brief</h2>
-                    {brief_html}
-                    """
-                    pdf_buffer = io.BytesIO()
-                    HTML(string=html_content).write_pdf(pdf_buffer)
-                    st.download_button(
-                        "⬇️ Download PDF Report",
-                        data=pdf_buffer.getvalue(),
-                        file_name="seo_cluster_report.pdf",
-                        mime="application/pdf"
-                    )
-                except Exception as e:
-                    st.error(f"Failed to generate PDF report: {str(e)}")
-        else:
-            st.info("PDF export requires the 'weasyprint' library. Install it to enable this feature.")
-
-    # Export summary
-    st.download_button(
-        "⬇️ Export clusters (CSV)",
-        data=export_csv(clusters),
-        file_name="clusters.csv",
-        mime="text/csv"
-    )
-else:
-    st.info("Upload a GSC Queries CSV to get started.")
-
-# Display re-clustering message if it exists
-if 'recluster_message' in st.session_state:
-    st.success(st.session_state['recluster_message'])
-    st.markdown(
-        """
-        <style>
-            div.stAlert div {
-                animation: fadeOut 5s forwards;
-            }
-            @keyframes fadeOut {
-                to { opacity: 0; }
-            }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
+    # Build Markdown
+    md = []
+    md.append(f"# Content Brief: {cluster_label}")
+    md.append("")
+    md.append(f"**Cluster ID:** {cluster_id}")
+    md.append(f"**Queries:** {len(data)}  ·  **Clicks:** {int(data['Clicks'].sum())}  ·  **Impressions:** {int(data['Impressions'].sum())}  ·  **Avg Pos:** {round(data['Position'].mean(),1) if not np.isnan(data['Position'].mean()) else '—'}")
+    md.append(f"**Recommended Page Type:** {page_type}  ·  **Suggested Length:** {min_words}–{max_words} words")
+    md.append("")
+    md.append("## Title / H1 Ideas")
+    md.append(_format_md_list(title_opts) if title_opts else "_(auto-generate after content)_")
+    md.append("")
+    md.append("## H2 / Sections to Cover")
+    md.append(_format_md_list(h2_suggestions) if h2_suggestions else "_(derive from queries)_")
+    md.append("")
+    md.append("## Key Phrases to Work In")
+    md.append(_format_md_list([p.title() for p in keyphrases]) if keyphrases else "_(auto)_")
+    md.append("")
+    if related_topics:
+        md.append("## Related Topics to Consider")
+        md.append(_format_md_list([p.title() for p in related_topics]))
+        md.append("")
+    if faqs:
+        md.append("## FAQs to Answer")
+        md.append(_format_md_list([q.rstrip("?") + "?" for q in faqs]))
+        md.append("")
+    if link_ids:
+        md.append("## Internal Link Suggestions (related clusters)")
+        md.append(_format_md_list([f"Cluster {cid}" for cid in link_ids]))
+        md.append("")
+    md.append("## Example Queries in this Cluster")
+    md.append(_format_md_list(data["Query"].head(10).tolist()))
+    return "\n".join(md)
