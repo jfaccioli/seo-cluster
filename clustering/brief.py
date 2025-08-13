@@ -119,54 +119,24 @@ def build_content_brief(
 
     # Generate titles/H1 ideas using GPT-2
     prompt = f"Generate 4 creative SEO-optimized H1 titles based on the topic '{cluster_label}' and key phrases {keyphrases[:3]}. Ensure they are unique, engaging, and include location or service context where relevant."
-    titles = generator(prompt, max_length=100, num_return_sequences=4, temperature=0.7)
-    title_opts = [t["generated_text"].split(prompt)[-1].strip() for t in titles]  # Extract generated text after prompt
+    titles = generator(prompt, max_length=50, num_return_sequences=3, temperature=0.5)
+    title_opts = []
+    for t in titles:
+        generated_text = t["generated_text"]
+        matches = re.findall(r'^(?!Generate).+$', generated_text, re.MULTILINE)[-4:]  # Last 4 non-prompt lines
+        title_opts.extend([m.strip() for m in matches if m.strip()])
 
     # Generate H2 sections using GPT-2
     h2_prompt = f"Generate 6 engaging H2 section titles for a content brief on '{cluster_label}' using key phrases {keyphrases[:3]} and intents {list(buckets.keys())}."
-    h2s = generator(h2_prompt, max_length=100, num_return_sequences=6, temperature=0.7)
-    h2_suggestions = [h["generated_text"].split(h2_prompt)[-1].strip() for h in h2s]  # Extract generated text after prompt
+    h2s = generator(h2_prompt, max_length=50, num_return_sequences=3, temperature=0.5)
+    h2_suggestions = []
+    for h in h2s:
+        generated_text = h["generated_text"]
+        matches = re.findall(r'^(?!Generate).+$', generated_text, re.MULTILINE)[-6:]  # Last 6 non-prompt lines
+        h2_suggestions.extend([m.strip() for m in matches if m.strip()])
 
     # Related topics (semantic expansion)
     related_topics = [p for p in keyphrases[3:8] if p not in h2_suggestions]
 
     # Page type & word count
-    page_type, min_words, max_words = _suggest_page_type(data["intent"], len(data))
-
-    # Internal links
-    link_ids = []
-    if centroids:
-        link_ids = nearest_clusters(centroids, cluster_id, top_n=5)
-
-    # Build Markdown
-    md = []
-    md.append(f"# Content Brief: {cluster_label}")
-    md.append("")
-    md.append(f"**Cluster ID:** {cluster_id}")
-    md.append(f"**Queries:** {len(data)}  ·  **Clicks:** {int(data['Clicks'].sum())}  ·  **Impressions:** {int(data['Impressions'].sum())}  ·  **Avg Pos:** {round(data['Position'].mean(),1) if not np.isnan(data['Position'].mean()) else '—'}")
-    md.append(f"**Recommended Page Type:** {page_type}  ·  **Suggested Length:** {min_words}–{max_words} words")
-    md.append("")
-    md.append("## Title / H1 Ideas")
-    md.append(_format_md_list(title_opts) if title_opts else "_(auto-generate after content)_")
-    md.append("")
-    md.append("## H2 / Sections to Cover")
-    md.append(_format_md_list(h2_suggestions) if h2_suggestions else "_(derive from queries)_")
-    md.append("")
-    md.append("## Key Phrases to Work In")
-    md.append(_format_md_list([p.title() for p in keyphrases]) if keyphrases else "_(auto)_")
-    md.append("")
-    if related_topics:
-        md.append("## Related Topics to Consider")
-        md.append(_format_md_list([p.title() for p in related_topics]))
-        md.append("")
-    if faqs:
-        md.append("## FAQs to Answer")
-        md.append(_format_md_list([q.rstrip("?") + "?" for q in faqs]))
-        md.append("")
-    if link_ids:
-        md.append("## Internal Link Suggestions (related clusters)")
-        md.append(_format_md_list([f"Cluster {cid}" for cid in link_ids]))
-        md.append("")
-    md.append("## Example Queries in this Cluster")
-    md.append(_format_md_list(data["Query"].head(10).tolist()))
-    return "\n".join(md)
+    page_type, min_words, max_words = _suggest
