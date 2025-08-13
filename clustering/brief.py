@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
-from transformers import pipeline, GPT2LMHeadModel, GPT2Tokenizer
+from transformers import pipeline
 import torch
 from sklearn.metrics.pairwise import cosine_similarity
 import markdown
@@ -17,7 +17,7 @@ except Exception as e:
     print(f"CUDA check failed: {e}, falling back to CPU (-1)")
     device = -1
 semantic_model = SentenceTransformer("distilbert-base-uncased")
-generator = pipeline("text-generation", model="gpt2", tokenizer="gpt2", device=device)
+generator = pipeline("text-generation", model="gpt2", device=device)
 
 def _semantic_top_phrases(texts: List[str], top_k: int = 10) -> List[str]:
     if not texts:
@@ -119,13 +119,13 @@ def build_content_brief(
 
     # Generate titles/H1 ideas using GPT-2
     prompt = f"Generate 4 creative SEO-optimized H1 titles based on the topic '{cluster_label}' and key phrases {keyphrases[:3]}. Ensure they are unique, engaging, and include location or service context where relevant."
-    titles = generator(prompt, max_length=20, num_return_sequences=4, temperature=0.7)
-    title_opts = [t["generated_text"].strip() for t in titles]
+    titles = generator(prompt, max_length=100, num_return_sequences=4, temperature=0.7)
+    title_opts = [t["generated_text"].split(prompt)[-1].strip() for t in titles]  # Extract generated text after prompt
 
     # Generate H2 sections using GPT-2
     h2_prompt = f"Generate 6 engaging H2 section titles for a content brief on '{cluster_label}' using key phrases {keyphrases[:3]} and intents {list(buckets.keys())}."
-    h2s = generator(h2_prompt, max_length=15, num_return_sequences=6, temperature=0.7)
-    h2_suggestions = [h["generated_text"].strip() for h in h2s]
+    h2s = generator(h2_prompt, max_length=100, num_return_sequences=6, temperature=0.7)
+    h2_suggestions = [h["generated_text"].split(h2_prompt)[-1].strip() for h in h2s]  # Extract generated text after prompt
 
     # Related topics (semantic expansion)
     related_topics = [p for p in keyphrases[3:8] if p not in h2_suggestions]
