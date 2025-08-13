@@ -5,6 +5,7 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 from transformers import pipeline, GPT2LMHeadModel, GPT2Tokenizer
 import torch
+from sklearn.metrics.pairwise import cosine_similarity
 import markdown
 
 WH_WORDS = r"^(who|what|when|where|why|how|can|does|do|is|are|should)\b"
