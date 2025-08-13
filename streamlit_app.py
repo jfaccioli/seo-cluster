@@ -218,7 +218,7 @@ if uploaded is not None:
                     f"Re-clustered {total_reclustered} queries: {new_clusters} new clusters formed, "
                     f"{remaining_unclustered} remain unclustered."
                 )
-                st.experimental_rerun()
+                st.rerun()
 
     # Intent tagging for dashboard breakdowns
     df_nb["intent"] = df_nb["Query_norm"].map(intent_bucket)
@@ -484,6 +484,7 @@ if uploaded is not None:
                     brief_html = markdown.markdown(brief_md) if brief_md else "<p>No brief selected or available.</p>"
                     html_content = f"""
                     <style>
+                        @page {{ size: A4 landscape; }}
                         body {{ font-family: Arial, sans-serif; margin: 20px; }}
                         h1 {{ color: #1f77b4; }}
                         h2 {{ color: #333; }}
@@ -506,7 +507,7 @@ if uploaded is not None:
                     {brief_html}
                     """
                     pdf_buffer = io.BytesIO()
-                    HTML(string=html_content, landscape=True).write_pdf(pdf_buffer)
+                    HTML(string=html_content).write_pdf(pdf_buffer)
                     st.download_button(
                         "⬇️ Download PDF Report",
                         data=pdf_buffer.getvalue(),
