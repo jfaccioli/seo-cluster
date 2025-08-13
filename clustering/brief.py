@@ -15,17 +15,9 @@ def _semantic_top_phrases(texts: List[str], top_k: int = 10) -> List[str]:
     if len(texts) == 0:
         return []
     embeddings = semantic_model.encode(texts, convert_to_numpy=True)
-    centroid = np.mean(embeddings, axis=0, keepdims=True)
-    similarities = list(cosine_similarity(embeddings, centroid).flatten())  # Convert to list of scalars
-    idx = np.argsort(similarities)[::-1]
-    tops = [texts[i] for i in idx[:top_k*2]]
-    out = []
-    for t in tops:
-        if not any(t in o or o in t for o in out if isinstance(o, str)):
-            out.append(t)
-        if len(out) >= top_k:
-            break
-    return out
+    norms = np.linalg.norm(embeddings, axis=1)  # Use norm as a simple relevance metric
+    idx = np.argsort(norms)[::-1]  # Sort by norm (highest first)
+    return [texts[i] for i in idx[:top_k]]  # Take top_k based on norm
 
 def _intent_bucket(q: str) -> str:
     s = q.lower()
@@ -99,10 +91,7 @@ def build_content_brief(
         docs = [" ".join(data["Query_norm"].tolist())]
         X = vectorizer.fit_transform(docs)
         terms = vectorizer.get_feature_names_out() if X.shape[1] > 0 else []
-        if not terms:
-            keyphrases = _semantic_top_phrases(data["Query_norm"].tolist(), top_k=top_phrases_k)
-        else:
-            keyphrases = _semantic_top_phrases(terms, top_k=top_phrases_k)
+        keyphrases = _semantic_top_phrases(terms if terms else data["Query_norm"].tolist(), top_k=top_phrases_k)
 
         # Intents & buckets
         data["intent"] = data["Query_norm"].map(_intent_bucket)
