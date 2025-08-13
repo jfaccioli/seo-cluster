@@ -112,7 +112,7 @@ with st.sidebar:
     trend_metric = st.selectbox("Trend metric", options=["Impressions", "Clicks"], index=0)
     st.markdown("---")
     st.caption("Tip: raise Min Impressions for big CSVs (>20k rows).")
-    st.caption("Use 'Re-cluster Unclustered' button if unclustered share is high (>50%) to find finer groups. If unclustered remains large, try lowering Min Cluster Size or excluding brand terms.")
+    st.caption("Use 'Re-cluster Unclustered' button if unclustered share is high (>50%) to find finer groups. Large unclustered is common for noisy GSC data; try lowering Min Cluster Size (e.g., to 5) or excluding brand terms.")
     if WEASYPRINT_AVAILABLE:
         st.caption("Download PDF reports for professional summaries under Content Brief.")
     else:
@@ -199,12 +199,13 @@ if uploaded is not None:
                 df_nb.update(unclustered)
                 st.session_state['df_nb'] = df_nb  # Persist data
                 # Count re-clustered vs remaining
+                initial_unclustered = (df_nb['cluster_id'] == -1).sum()
                 new_clusters = unclustered[unclustered["cluster_id"] != -1]["cluster_id"].nunique()
                 remaining_unclustered = len(unclustered[unclustered["cluster_id"] == -1])
                 total_reclustered = len(unclustered)
                 st.session_state['recluster_message'] = (
                     f"Re-clustered {total_reclustered} queries: {new_clusters} new clusters formed, "
-                    f"{remaining_unclustered} remain unclustered."
+                    f"Unclustered reduced from {initial_unclustered} to {initial_unclustered - total_reclustered + remaining_unclustered}."
                 )
                 st.rerun()
 
@@ -248,6 +249,7 @@ if uploaded is not None:
     clustered_impr = max(total_impr - unclustered_impr, 0)
 
     # Debug: Log clusters shape and KPI values
+    st.write(f"Debug: chosen_label type: {type(chosen_label)}")  # Debug log for cluster_label type
     st.write(f"Debug: clusters shape: {clusters.shape}")
     st.write(f"Debug: Before re-clustering (if any): unclustered = {(df_nb['cluster_id'] == -1).sum()}")
     avg_position = f"{df_nb['Position'].mean():.2f}" if df_nb["Position"].notna().any() else "—"
@@ -438,6 +440,8 @@ if uploaded is not None:
         chosen_id = int(sel.split("]")[0].strip("[")) if sel else None
         chosen_row = clusters[clusters["cluster_id"] == chosen_id].head(1)
         chosen_label = chosen_row["cluster_label"].iloc[0] if not chosen_row.empty else ""
+        # Debug log for cluster_label type
+        st.write(f"Debug: chosen_label type: {type(chosen_label)}")
         # Ensure chosen_label is a valid string
         if pd.isna(chosen_label) or not isinstance(chosen_label, str) or not chosen_label.strip():
             st.warning(f"Invalid cluster label for ID {chosen_id}. Using fallback label.")
